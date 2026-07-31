@@ -1,0 +1,15 @@
+# Smir ingest — MediaMTX for lab / GoPro RTMP
+# Usage: cd apps/ingest && docker compose up -d
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: smir-mediamtx
+    ports:
+      - "1935:1935"   # RTMP ingest (GoPro Live / FFmpeg)
+      - "8554:8554"   # RTSP read
+      - "8888:8888"   # HLS
+      - "9997:9997"   # API
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    command: /mediamtx.yml
+    restart: unless-stopped

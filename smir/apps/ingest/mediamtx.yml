@@ -1,0 +1,48 @@
+# Smir — MediaMTX (Phase 1)
+# https://github.com/bluenviron/mediamtx
+
+logLevel: info
+api: yes
+apiAddress: :9997
+
+rtmp: yes
+rtmpAddress: :1935
+
+rtsp: yes
+rtspAddress: :8554
+
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+
+paths:
+  # Demo publishers (Phase 0)
+  demo_general_a:
+    source: publisher
+  demo_general_b:
+    source: publisher
+  demo_consent:
+    source: publisher
+
+  # GoPro HERO13 / FFmpeg → RTMP publish to rtmp://HOST:1935/gopro_main
+  gopro_main:
+    source: publisher
+    # Readers: rtsp://HOST:8554/gopro_main
+    # HLS:     http://HOST:8888/gopro_main/index.m3u8
+
+  gopro_consent:
+    source: publisher
+
+  # Face-worker → RTMP (live с аватарами)
+  gopro_avatar:
+    source: publisher
+    # HLS: http://HOST:8888/gopro_avatar/index.m3u8
+
+  # Динамические потоки мест (poi_*, poi_*_avatar) из local_relay
+  "~^poi_":
+    source: publisher
+    overridePublisher: true
+
+  all_others:
+    source: publisher
+    overridePublisher: true

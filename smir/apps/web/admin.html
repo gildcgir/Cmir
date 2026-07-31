@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Smir — администрирование</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="css/app.css" />
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
+</head>
+<body class="admin-page">
+  <nav class="topnav">
+    <h1>Smir Admin <span class="env-badge" id="envBadge">test</span></h1>
+    <span id="adminUserLabel" class="msg" style="margin:0 1rem"></span>
+    <button type="button" class="tab-btn secondary" id="btnBack">← К сайту</button>
+    <button type="button" class="tab-btn secondary" id="btnLogoutAdmin">Выйти</button>
+  </nav>
+
+  <div class="admin-tabs">
+    <button type="button" class="tab-btn active" data-admin-tab="places">Места</button>
+    <button type="button" class="tab-btn" data-admin-tab="users">Пользователи</button>
+    <button type="button" class="tab-btn" data-admin-tab="quality">Качество сети</button>
+    <button type="button" class="tab-btn" data-admin-tab="stats">Статистика</button>
+  </div>
+
+  <div id="panelPlaces" class="admin-tab-panel active">
+    <div class="admin-layout">
+      <div class="admin-map-wrap">
+        <p class="map-hint" id="mapPickHint">Кликните на дом на карте, чтобы добавить место</p>
+        <div id="adminMap" class="admin-map"></div>
+      </div>
+      <aside class="admin-side">
+        <div class="admin-section">
+          <h3>Место на карте</h3>
+          <button type="button" class="primary" id="btnAddPoi" style="width:100%;margin-bottom:0.75rem">Добавить место</button>
+          <label class="hint" for="poiSelect">Выберите место для редактирования</label>
+          <select id="poiSelect"><option value="">— нет мест —</option></select>
+          <input id="poiName" placeholder="Наименование" />
+          <input id="poiAddress" placeholder="Адрес" />
+          <button type="button" class="secondary" id="btnGeocode" style="width:100%;margin-bottom:0.5rem">Найти по адресу</button>
+          <textarea id="poiComment" placeholder="Комментарий"></textarea>
+          <input id="poiLat" placeholder="Широта" />
+          <input id="poiLng" placeholder="Долгота" />
+          <div class="row-btns">
+            <button type="button" class="secondary" id="btnSavePoi">Сохранить место</button>
+            <button type="button" class="secondary" id="btnDeletePoi" style="color:#ff8a80">Удалить</button>
+          </div>
+        </div>
+
+        <div class="admin-section" id="camerasSection" style="display:none">
+          <h3>Камеры места</h3>
+          <p class="hint">До 5 USB-камер. Типы: общий план, согласие, перфоманс (интервью/стол)</p>
+          <div id="cameraSlots"></div>
+          <button type="button" class="secondary" id="btnAddCameraSlot" style="width:100%">+ Добавить камеру</button>
+          <button type="button" class="primary" id="btnSaveCameras" style="width:100%;margin-top:0.5rem">Сохранить камеры</button>
+        </div>
+
+        <div class="admin-section preview-inactive" id="maskSection">
+          <h3>Превью новой маски</h3>
+          <p class="hint" id="maskCameraHint">Доступно при включённой рабочей камере</p>
+          <div class="stream-sample">
+            <video id="adminCameraPreview" muted playsinline></video>
+            <canvas id="maskOverlayCanvas" class="mask-overlay-canvas"></canvas>
+          </div>
+          <input type="file" id="maskFile" accept="image/png,image/jpeg,image/webp" disabled />
+          <div class="row-btns">
+            <button type="button" class="primary" id="btnApplyMask" disabled>Применить к месту</button>
+            <button type="button" class="secondary" id="btnRemoveMask" disabled>Убрать</button>
+          </div>
+        </div>
+        <pre class="log" id="adminLog"></pre>
+      </aside>
+    </div>
+  </div>
+
+  <div id="panelUsers" class="admin-tab-panel admin-tab-panel--scroll">
+    <div style="max-width:520px;margin:1rem auto;padding:0 1rem">
+      <div class="admin-section">
+        <h3>Пользователи</h3>
+        <table class="users">
+          <thead><tr><th>Email</th><th>Роль</th><th>Кошелёк UT</th><th>Блок</th></tr></thead>
+          <tbody id="usersBody"></tbody>
+        </table>
+        <hr style="border-color:#2a3548;margin:0.75rem 0" />
+        <input id="newUserEmail" placeholder="Email нового" />
+        <input id="newUserName" placeholder="Имя" />
+        <input id="newUserPass" type="password" placeholder="Пароль (8+)" />
+        <select id="newUserRole"><option value="user">user</option><option value="admin">admin</option></select>
+        <button type="button" class="secondary" id="btnAddUser" style="width:100%">Добавить</button>
+        <hr style="border-color:#2a3548;margin:0.75rem 0" />
+        <input id="editUserEmail" placeholder="Email" />
+        <input id="editUserName" placeholder="Имя" />
+        <input id="editUserPass" type="password" placeholder="Новый пароль" />
+        <select id="editUserRole"><option value="user">user</option><option value="admin">admin</option></select>
+        <input id="blockHours" type="number" value="24" />
+        <div class="row-btns">
+          <button type="button" class="secondary" id="btnSaveUser">Сохранить</button>
+          <button type="button" class="secondary" id="btnBlockUser">Заблокировать</button>
+          <button type="button" class="secondary" id="btnUnblockUser">Разблок.</button>
+          <button type="button" class="secondary" id="btnDeleteUser" style="color:#ff8a80">Удалить</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="panelQuality" class="admin-tab-panel admin-tab-panel--scroll">
+    <div class="admin-layout-quality">
+      <div class="admin-section">
+        <h3>Качество сигнала сети камер</h3>
+        <button type="button" class="primary" id="btnCheckQuality">Проверить все камеры</button>
+        <p class="quality-score" id="qualityScore">—</p>
+        <p class="hint" id="qualityGrade"></p>
+        <div id="qualityList"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="panelStats" class="admin-tab-panel admin-tab-panel--scroll">
+    <div style="max-width:960px;margin:1rem auto;padding:0 1rem">
+      <div class="admin-section">
+        <h3>Аналитика системы</h3>
+        <button type="button" class="primary" id="btnRefreshStats">Обновить отчёт</button>
+        <div id="statsCards" class="stats-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:0.75rem;margin-top:1rem"></div>
+        <h4 style="margin-top:1.5rem">Камеры по типам</h4>
+        <div id="statsCameras"></div>
+        <h4 style="margin-top:1.5rem">Топ мест по согласиям</h4>
+        <div id="statsTopPois"></div>
+        <h4 style="margin-top:1.5rem">Качество сети (сводка)</h4>
+        <p id="statsQuality"></p>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="addPoiModal">
+    <div class="modal" role="dialog">
+      <h2 id="addPoiModalTitle">Новое место на карте</h2>
+      <p class="hint" id="addPoiMapInfo" style="display:none"></p>
+      <form id="formAddPoi">
+        <input id="dlgPoiName" placeholder="Наименование" required />
+        <input id="dlgPoiAddress" placeholder="Адрес" />
+        <textarea id="dlgPoiComment" placeholder="Комментарий"></textarea>
+        <input type="hidden" id="dlgPoiLat" />
+        <input type="hidden" id="dlgPoiLng" />
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="btnCancelAddPoi">Отмена</button>
+          <button type="submit" class="primary">Добавить</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script type="module">
+    import { initAdmin } from "./js/admin.js";
+    initAdmin().catch((e) => {
+      console.error(e);
+      alert("Ошибка загрузки админки: " + e.message);
+    });
+  </script>
+</body>
+</html>

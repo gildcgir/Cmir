@@ -1,0 +1,23 @@
+/.DS_Store
+/TheHotPotSpot
+/cuekit
+/docs
+/the-hot-pot-spot-docs
+/the-hot-pot-spot-private
+/the-hot-pot-spot-public
+
+# local lab / secrets — never publish
+.lab-pids/
+**/.lab-pids/
+**/.lab-pids/**
+*.db
+*.db-*
+**/*.db
+**/*.db-*
+**/data/buffers/
+**/data/masks/
+.env
+.env.*
+**/.env
+**/.env.*
+**/camera-publish.log
