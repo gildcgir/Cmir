@@ -157,7 +157,7 @@ function stopViewTracking() {
   viewCameraId = null;
 }
 
-async function releaseStream(poiId, { force = true } = {}) {
+async function releaseStream(poiId, { force = false } = {}) {
   if (!poiId) return;
   try {
     await api("POST", `/api/v1/pois/${poiId}/stream/release`, {
@@ -202,7 +202,7 @@ async function closePoiPanel() {
   setPreviewStatus("");
   selectedPoi = null;
   previewAttempt = 0;
-  if (poiId) await releaseStream(poiId, { force: true });
+  if (poiId) await releaseStream(poiId, { force: false });
 }
 
 function startViewTracking(cameraId) {
@@ -367,7 +367,7 @@ async function startPoiPreview(poi, fromRetry = false) {
     || !!cam.device_id || (cam.stream_url || "").startsWith("local://");
 
   if (activeStreamPoi && activeStreamPoi !== poi.id) {
-    await releaseStream(activeStreamPoi, { force: true });
+    await releaseStream(activeStreamPoi, { force: false });
   }
   activeStreamPoi = poi.id;
 
@@ -377,7 +377,7 @@ async function startPoiPreview(poi, fromRetry = false) {
     try {
       setPreviewStatus("Подключение камеры…");
       // освобождаем device, если relay ещё держит ffmpeg
-      await releaseStream(poi.id, { force: true });
+      await releaseStream(poi.id, { force: false });
       activeStreamPoi = poi.id;
       await new Promise((r) => setTimeout(r, 350));
       const { LiveCameraView } = mod;
@@ -391,7 +391,7 @@ async function startPoiPreview(poi, fromRetry = false) {
         cameraId: cam.id,
         compositeMode: true,
       });
-      liveView.onRecognized = () => { liveView.loadConsentedFaces().catch(() => {}); };
+      liveView.onRecognized = null;
       setPreviewStatus("Прямой эфир (веб-камера)");
       previewAttempt = 0;
       return;
@@ -570,7 +570,6 @@ function renderConsents(u) {
       try {
         await api("DELETE", `/api/v1/pois/${btn.dataset.revokePoi}/consent/${btn.dataset.revokeId}`);
         await refreshAuth();
-        if (liveView) await liveView.loadConsentedFaces();
       } catch (err) {
         alert(err.message || "Не удалось отозвать");
       }
@@ -621,7 +620,6 @@ async function refreshAuth() {
       ? `${u.display_name} (${u.email})\nКошелёк: ${w.address}\nST: ${w.balance_st} · UT: ${w.balance_ut}`
       : `${u.display_name} (${u.email})`;
     await fillProfileForm(u);
-    if (liveView) await liveView.loadConsentedFaces();
   } catch {
     setToken("");
     refreshAuth();
@@ -645,7 +643,7 @@ function bindEvents() {
     navigator.sendBeacon(
       `${API}/api/v1/pois/${poiId}/stream/release`,
       new Blob(
-        [JSON.stringify({ client_id: getClientId(), force: true })],
+        [JSON.stringify({ client_id: getClientId(), force: false })],
         { type: "application/json" },
       ),
     );
@@ -660,7 +658,7 @@ function bindEvents() {
         navigator.sendBeacon(
           `${API}/api/v1/pois/${poiId}/stream/release`,
           new Blob(
-            [JSON.stringify({ client_id: getClientId(), force: true })],
+            [JSON.stringify({ client_id: getClientId(), force: false })],
             { type: "application/json" },
           ),
         );
@@ -691,6 +689,7 @@ function bindEvents() {
         password: fd.get("password"),
       });
       setToken(r.data.token);
+      if (r.data.user) localStorage.setItem("cmir_user", JSON.stringify(r.data.user));
       els.authMsg().textContent = "Вход выполнен";
       els.authMsg().className = "msg ok";
       await refreshAuth();
@@ -723,6 +722,7 @@ function bindEvents() {
   document.getElementById("btnLogout").addEventListener("click", async () => {
     try { await api("POST", "/api/v1/auth/logout", {}); } catch (_) {}
     setToken("");
+    localStorage.removeItem("cmir_user");
     refreshAuth();
   });
 

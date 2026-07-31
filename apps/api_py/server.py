@@ -148,14 +148,12 @@ def require_admin(handler: BaseHTTPRequestHandler) -> Optional[dict]:
 
 
 def _worker_authorized(handler: BaseHTTPRequestHandler) -> bool:
-    """Face-worker: X-Cmir-Worker == CMIR_WORKER_TOKEN, либо lab без токена (не prod)."""
+    """Face-worker: X-Cmir-Worker must match CMIR_WORKER_TOKEN (always required)."""
     expected = os.environ.get("CMIR_WORKER_TOKEN", "").strip()
     got = (handler.headers.get("X-Cmir-Worker") or "").strip()
-    if expected and got and secrets.compare_digest(expected, got):
-        return True
-    if not expected and app_env() != "prod":
-        return True
-    return False
+    if not expected or not got:
+        return False
+    return secrets.compare_digest(expected, got)
 
 
 def parse_multipart(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -511,6 +509,8 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         if path == "/api/v1/consented-faces":
+            if not _worker_authorized(self):
+                return json_response(self, 401, {"success": False, "error": "worker token required"})
             return json_response(
                 self,
                 200,
@@ -558,6 +558,8 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, 200, {"success": True, "data": data})
 
         if len(parts) == 5 and parts[2] == "pois" and parts[4] == "embeddings":
+            if not (_worker_authorized(self) or STORE.is_admin(STORE.user_from_token(bearer_token(self)) or {})):
+                return json_response(self, 401, {"success": False, "error": "worker or admin required"})
             poi_id = parts[3]
             try:
                 embs = STORE.poi_embeddings(poi_id)
@@ -824,10 +826,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if len(parts) == 6 and parts[2] == "pois" and parts[4] == "stream" and parts[5] == "acquire":
             poi_id = parts[3]
+            if app_env() == "prod" and require_user(self) is None:
+                return
             cid = body.get("client_id") or "anonymous"
             wait = bool(body.get("wait_hls", True))
-            # browser_usb: клиент держит FaceTime через getUserMedia — ffmpeg не трогаем
+            # browser_usb: клиент держит FaceTime через getUserMedia — освобождаем ffmpeg
             if body.get("browser_usb") or body.get("publish") is False:
+                LOCAL_RELAY.force_stop(poi_id)
                 return json_response(
                     self,
                     200,
@@ -870,8 +875,12 @@ class Handler(BaseHTTPRequestHandler):
             poi_id = parts[3]
             cid = body.get("client_id") or "anonymous"
             if body.get("force"):
+                if require_admin(self) is None:
+                    return
                 LOCAL_RELAY.force_stop(poi_id)
             else:
+                if app_env() == "prod" and require_user(self) is None:
+                    return
                 LOCAL_RELAY.release(poi_id, cid)
             return json_response(
                 self,
@@ -1058,8 +1067,24 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, 404, {"success": False, "error": "not found"})
             return json_response(self, 200, {"success": True, "data": data})
 
+        if path == "/api/v1/face-match":
+            emb = body.get("embedding")
+            if not isinstance(emb, list):
+                return json_response(self, 400, {"success": False, "error": "embedding required"})
+            try:
+                vec = [float(x) for x in emb]
+            except (TypeError, ValueError):
+                return json_response(self, 400, {"success": False, "error": "invalid embedding"})
+            hit = STORE.match_face_embedding(
+                vec,
+                prior_user_id=str(body.get("prior_user_id") or ""),
+            )
+            if not hit:
+                return json_response(self, 200, {"success": True, "data": {"matched": False}})
+            return json_response(self, 200, {"success": True, "data": hit})
+
         if path == "/api/v1/face-presence":
-            # face-worker / lab: пакет presence; пользователь может слать свой tick
+            # face-worker: пакет presence с worker-token; пользователь — только self
             items = body.get("presence")
             if items is None and body.get("user_id") and body.get("camera_id"):
                 items = [
@@ -1072,13 +1097,15 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(items, list) or not items:
                 return json_response(self, 400, {"success": False, "error": "presence[] required"})
             worker_ok = _worker_authorized(self)
-            user = None if worker_ok else require_user(self)
-            if not worker_ok and user is None:
-                return
+            user = None
+            if not worker_ok:
+                user = require_user(self)
+                if user is None:
+                    return
             results = []
             for it in items:
                 uid = it.get("user_id") or (user["id"] if user else "")
-                if user and not STORE.is_admin(user) and uid != user["id"] and not worker_ok:
+                if user and not STORE.is_admin(user) and uid != user["id"]:
                     return json_response(self, 403, {"success": False, "error": "forbidden"})
                 try:
                     results.append(

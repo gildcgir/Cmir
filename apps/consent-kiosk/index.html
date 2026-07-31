@@ -197,7 +197,7 @@
       navigator.sendBeacon(
         `${API}/api/v1/pois/${poiId}/stream/release`,
         new Blob(
-          [JSON.stringify({ client_id: getClientId(), force: true })],
+          [JSON.stringify({ client_id: getClientId(), force: false })],
           { type: 'application/json' },
         ),
       );
@@ -243,7 +243,6 @@
       document.getElementById('accountLink').style.display = 'block';
       setStatus(message || `${name || 'Пользователь'}: согласие активно, маска не применяется.`, true);
       liveLabel.textContent = name ? `${name} — в кадре без маски` : 'Согласие уже дано';
-      if (liveView) liveView.loadConsentedFaces().catch(() => {});
     }
 
     function wireLiveView(view) {
@@ -554,6 +553,7 @@
         };
         const res = await api('POST', `/api/v1/pois/${poiId}/kiosk-register`, payload);
         if (res.data?.auth?.token) setToken(res.data.auth.token);
+        if (res.data?.user) localStorage.setItem("cmir_user", JSON.stringify(res.data.user));
         document.getElementById('accountLink').style.display = 'block';
         lockKioskRegistered(
           document.getElementById('fullName').value.trim() || res.data?.user?.display_name,

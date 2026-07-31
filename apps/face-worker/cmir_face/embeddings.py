@@ -158,10 +158,14 @@ def post_face_presence(api_url: str, camera_id: str, presence: List[dict], worke
 
 def fetch_consented_faces_from_api(api_url: str) -> List[dict]:
     try:
+        import os
         import urllib.request
 
         url = f"{api_url.rstrip('/')}/api/v1/consented-faces"
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        token = os.environ.get("CMIR_WORKER_TOKEN", "").strip()
+        headers = {"X-Cmir-Worker": token} if token else {}
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
         return list(data.get("data", {}).get("faces", []))
     except Exception as e:
@@ -171,10 +175,14 @@ def fetch_consented_faces_from_api(api_url: str) -> List[dict]:
 
 def fetch_embeddings_from_api(api_url: str, poi_id: str) -> List[np.ndarray]:
     try:
+        import os
         import urllib.request
 
         url = f"{api_url.rstrip('/')}/api/v1/pois/{poi_id}/embeddings"
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        token = os.environ.get("CMIR_WORKER_TOKEN", "").strip()
+        headers = {"X-Cmir-Worker": token} if token else {}
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
         out: List[np.ndarray] = []
         for item in data.get("data", {}).get("embeddings", []):

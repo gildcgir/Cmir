@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from database import db_path
+from database import app_env, db_path
 
 LEGAL_VERSION = "1.0.0-ge"
 DOC_TYPES = (
@@ -41,6 +41,11 @@ def legal_dir() -> Path:
     return d
 
 
+def require_data_key_in_prod() -> None:
+    if app_env() == "prod" and not os.environ.get("CMIR_DATA_KEY", "").strip():
+        raise RuntimeError("CMIR_DATA_KEY is required in production")
+
+
 def _fernet():
     import base64
 
@@ -48,16 +53,25 @@ def _fernet():
         from cryptography.fernet import Fernet
     except ImportError:
         return None
-    key = os.environ.get("CMIR_DATA_KEY", "")
+    key = os.environ.get("CMIR_DATA_KEY", "").strip()
     if not key:
+        if app_env() == "prod":
+            return None
+        # lab/test only: stable key derived from DB path (not for production)
         seed = hashlib.sha256(str(db_path()).encode()).digest()
         key = base64.urlsafe_b64encode(seed).decode()
-    return Fernet(key.encode() if isinstance(key, str) else key)
+    try:
+        return Fernet(key.encode() if isinstance(key, str) else key)
+    except Exception:
+        digest = hashlib.sha256(key.encode()).digest()
+        return Fernet(base64.urlsafe_b64encode(digest))
 
 
 def encrypt_embedding(vec: list[float]) -> str:
     f = _fernet()
     if f is None:
+        if app_env() == "prod":
+            raise RuntimeError("cryptography/Fernet unavailable; cannot store biometrics")
         return json.dumps(vec)
     return f.encrypt(json.dumps(vec).encode()).decode()
 
@@ -65,11 +79,12 @@ def encrypt_embedding(vec: list[float]) -> str:
 def decrypt_embedding(blob: str) -> Optional[list[float]]:
     if not blob:
         return None
+    # legacy plaintext JSON
     try:
         data = json.loads(blob)
         if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
+            return [float(x) for x in data]
+    except (json.JSONDecodeError, TypeError, ValueError):
         pass
     f = _fernet()
     if f is None:

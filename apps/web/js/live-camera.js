@@ -10,12 +10,13 @@ import {
 } from "./mask-preview.js";
 
 const PATCH = 32;
-const MATCH_THRESHOLD = 0.72;
-const MATCH_HOLD_THRESHOLD = 0.62; // hysteresis while already matched
+const MATCH_THRESHOLD = 0.82;
+const MATCH_HOLD_THRESHOLD = 0.75; // hysteresis while already matched
 const DETECT_INTERVAL_MS = 33;
 const MIN_MASK_CONFIRM_FRAMES = 2;
 const SIG_BLEND = 0.35;
 const CONSENT_HOLD_FRAMES = 20;
+const FACE_MATCH_INTERVAL_MS = 400;
 
 function deviceIdFromCamera(cam) {
   if (cam?.device_id) return cam.device_id;
@@ -31,42 +32,21 @@ function cosine(a, b) {
   return s;
 }
 
-function faceTemplateVectors(face) {
-  const out = [];
-  if (Array.isArray(face?.embeddings)) {
-    for (const e of face.embeddings) if (e?.length === PATCH * PATCH) out.push(e);
-  }
-  if (Array.isArray(face?.templates)) {
-    for (const t of face.templates) {
-      const e = t?.embedding || t;
-      if (e?.length === PATCH * PATCH) out.push(e);
-    }
-  }
-  if (!out.length && face?.embedding?.length === PATCH * PATCH) out.push(face.embedding);
-  return out;
+function authHeaders(extra = {}) {
+  const h = { ...extra };
+  const t = localStorage.getItem("cmir_token") || "";
+  if (t) h.Authorization = "Bearer " + t;
+  return h;
 }
 
-function bestFaceScore(sig, face) {
-  let best = 0;
-  for (const emb of faceTemplateVectors(face)) {
-    best = Math.max(best, cosine(sig, emb));
+function currentUserId() {
+  try {
+    const raw = localStorage.getItem("cmir_user");
+    if (!raw) return "";
+    return JSON.parse(raw)?.id || "";
+  } catch (_) {
+    return "";
   }
-  return best;
-}
-
-function matchFace(sig, faces, { priorUserId = "" } = {}) {
-  if (!sig) return null;
-  let best = null;
-  let bestScore = priorUserId ? MATCH_HOLD_THRESHOLD : MATCH_THRESHOLD;
-  for (const f of faces) {
-    const thr = priorUserId && f.user_id === priorUserId ? MATCH_HOLD_THRESHOLD : MATCH_THRESHOLD;
-    const score = bestFaceScore(sig, f);
-    if (score >= thr && score >= bestScore) {
-      bestScore = score;
-      best = f;
-    }
-  }
-  return best;
 }
 
 /** Фильтр ложных срабатываний (руки и т.п.) — только похожие на лицо bbox. */
@@ -260,9 +240,8 @@ export class LiveCameraView {
     this.raf = 0;
     this.lastTs = 0;
     this.faceSmooth = new Map();
-    this.consentedFaces = [];
+    this.matchCache = new Map(); // trackKey → { user_id, display_name, at, pending }
     this.apiBase = "";
-    this.reloadTimer = null;
     this.ready = false;
     this.compositeMode = true;
     this.onRecognized = null;
@@ -293,15 +272,46 @@ export class LiveCameraView {
     this.ready = true;
   }
 
-  async loadConsentedFaces() {
-    if (!this.apiBase) return;
-    try {
-      const res = await fetch(`${this.apiBase}/api/v1/consented-faces`);
-      const json = await res.json();
-      this.consentedFaces = json.data?.faces || [];
-    } catch (_) {
-      this.consentedFaces = [];
-    }
+  /** Server-side match — gallery never downloaded to the browser. */
+  requestFaceMatch(trackKey, sig, priorUserId) {
+    if (!this.apiBase || !sig) return;
+    const cached = this.matchCache.get(trackKey);
+    const now = performance.now();
+    if (cached?.pending) return;
+    if (cached && now - cached.at < FACE_MATCH_INTERVAL_MS) return;
+    this.matchCache.set(trackKey, {
+      ...(cached || {}),
+      pending: true,
+      at: now,
+    });
+    fetch(`${this.apiBase}/api/v1/face-match`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        embedding: sig,
+        prior_user_id: priorUserId || "",
+      }),
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        const data = json.data || {};
+        this.matchCache.set(trackKey, {
+          user_id: data.matched ? data.user_id : null,
+          display_name: data.matched ? data.display_name || "" : null,
+          at: performance.now(),
+          pending: false,
+        });
+      })
+      .catch(() => {
+        const prev = this.matchCache.get(trackKey) || {};
+        this.matchCache.set(trackKey, { ...prev, pending: false, at: performance.now() });
+      });
+  }
+
+  cachedMatch(trackKey) {
+    const c = this.matchCache.get(trackKey);
+    if (!c?.user_id) return null;
+    return { user_id: c.user_id, display_name: c.display_name || "" };
   }
 
   setMaskImageUrl(url) {
@@ -332,7 +342,6 @@ export class LiveCameraView {
     if (this.compositeMode) this.canvas.style.opacity = "0";
 
     await this.init();
-    await this.loadConsentedFaces();
 
     let stream;
     if (deviceId) {
@@ -358,10 +367,7 @@ export class LiveCameraView {
       this.drawFrame(ts);
     };
     this.raf = requestAnimationFrame(tick);
-
-    if (this.reloadTimer) clearInterval(this.reloadTimer);
-    this.reloadTimer = setInterval(() => this.loadConsentedFaces(), 5000);
-    this.presenceTimer = setInterval(() => this.flushPresence(), 1000);
+    this.presenceTimer = setInterval(() => this.flushPresence(), 5000);
   }
 
   getLastFaceSignature() {
@@ -370,17 +376,24 @@ export class LiveCameraView {
   }
 
   flushPresence() {
+    // Browser may only report self (JWT); worker reports all matched faces.
     if (!this.apiBase || !this.cameraId || !this.presenceAcc.size) return Promise.resolve();
-    const presence = [...this.presenceAcc.entries()].map(([userId, seconds]) => ({
-      user_id: userId,
-      camera_id: this.cameraId,
-      seconds: Math.round(seconds * 1000) / 1000,
-    }));
+    const token = localStorage.getItem("cmir_token") || "";
+    const selfId = currentUserId();
+    if (!token || !selfId) {
+      this.presenceAcc.clear();
+      return Promise.resolve();
+    }
+    const seconds = this.presenceAcc.get(selfId) || 0;
     this.presenceAcc.clear();
+    if (seconds <= 0) return Promise.resolve();
     return fetch(`${this.apiBase}/api/v1/face-presence`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ camera_id: this.cameraId, presence }),
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        camera_id: this.cameraId,
+        presence: [{ user_id: selfId, camera_id: this.cameraId, seconds: Math.round(seconds * 1000) / 1000 }],
+      }),
       keepalive: true,
     }).catch(() => {});
   }
@@ -390,10 +403,6 @@ export class LiveCameraView {
     this.running = false;
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
-    if (this.reloadTimer) {
-      clearInterval(this.reloadTimer);
-      this.reloadTimer = null;
-    }
     if (this.presenceTimer) {
       clearInterval(this.presenceTimer);
       this.presenceTimer = null;
@@ -406,12 +415,21 @@ export class LiveCameraView {
     this.video.classList.remove("live-source-hidden");
     this.canvas.parentElement?.classList.remove("privacy-composite");
     this.faceSmooth.clear();
+    this.matchCache.clear();
     this.presenceAcc.clear();
     this.lastFaceBbox = null;
     this.privacyReady = false;
     this.firstDetectDone = false;
     this.ctx?.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    if (!keepReady) this.ready = false;
+    if (!keepReady) {
+      this.ready = false;
+      if (this.detector) {
+        try {
+          this.detector.close();
+        } catch (_) {}
+        this.detector = null;
+      }
+    }
   }
 
   resizeCanvas() {
@@ -460,13 +478,14 @@ export class LiveCameraView {
         const sigRaw = signatureFromVideo(video, d.boundingBox);
         const sig = blendSignature(prev?.sig, sigRaw);
         const priorId = prev?.userId || "";
-        let face = matchFace(sig, this.consentedFaces, { priorUserId: priorId });
+        this.requestFaceMatch(key, sig, priorId);
+        let face = this.cachedMatch(key);
         let hold = prev?.hold || 0;
         if (face?.user_id) {
           hold = CONSENT_HOLD_FRAMES;
         } else if (hold > 0 && priorId) {
           // hysteresis: keep registered identity briefly on angled frames
-          face = this.consentedFaces.find((f) => f.user_id === priorId) || null;
+          face = { user_id: priorId, display_name: prev?.name || "" };
           hold -= 1;
         } else {
           hold = 0;
@@ -578,10 +597,14 @@ export async function startMaskedPageCamera({
         onStatus?.(i ? `Камера занята, повтор ${i + 1}/3…` : "Подключение USB-камеры…");
         // снять ffmpeg с этого POI, чтобы освободить FaceTime
         if (poi?.id) {
-          await fetch(`${apiBase}/api/v1/pois/${poi.id}/stream/release`, {
+          await fetch(`${apiBase}/api/v1/pois/${poi.id}/stream/acquire`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ client_id: clientId || "browser", force: true }),
+            body: JSON.stringify({
+              client_id: clientId || "browser",
+              browser_usb: true,
+              wait_hls: false,
+            }),
           }).catch(() => {});
         }
         const view = new LiveCameraView(video, canvas);

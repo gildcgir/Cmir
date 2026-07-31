@@ -48,7 +48,8 @@ class LocalRelay:
             row = self._row_for_poi(poi_id)
             if not row:
                 return False
-            self._ensure_poi(row, wait_hls=wait_hls)
+            # Never wait for HLS under the relay lock
+            self._ensure_poi(row, wait_hls=False)
             self._preview.start_capture(poi_id)
         if wait_hls:
             return hls_playlist_ready(poi_hls_url(poi_id), timeout=3.0)
@@ -100,7 +101,7 @@ class LocalRelay:
         if not row:
             return False
         with self._lock:
-            self._ensure_poi(row, wait_hls=wait_hls)
+            self._ensure_poi(row, wait_hls=False)
         if wait_hls:
             return hls_playlist_ready(poi_hls_url(poi_id), timeout=2.5)
         return True
@@ -176,7 +177,8 @@ class LocalRelay:
         poi_id = row["poi_id"]
         if self._publisher_alive(poi_id):
             hls_url = poi_hls_url(poi_id)
-            stale = wait_hls and not hls_playlist_ready(hls_url, timeout=1.2)
+            # Quick non-blocking readiness probe — never sleep under lock
+            stale = wait_hls and not hls_playlist_ready(hls_url, timeout=0.25)
             if stale:
                 print(f"[relay] stale publisher for poi {poi_id[:8]}… — restarting ffmpeg")
                 self._stop_poi(poi_id)

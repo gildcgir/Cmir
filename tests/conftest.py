@@ -31,6 +31,9 @@ def tmp_db_path(monkeypatch):
     db = Path(path)
     monkeypatch.setenv("CMIR_ENV", "test")
     monkeypatch.setenv("CMIR_DB_PATH", str(db))
+    monkeypatch.setenv("CMIR_WORKER_TOKEN", "test-worker-token")
+    monkeypatch.setenv("CMIR_DATA_KEY", "test-data-key-not-for-prod-use!!")
+    monkeypatch.setenv("CMIR_ADMIN_PASSWORD", "admin")
     yield db
     if db.is_file():
         db.unlink(missing_ok=True)
@@ -51,6 +54,9 @@ def api_server():
     import server as api_server_mod
 
     os.environ.setdefault("CMIR_ENV", "test")
+    os.environ.setdefault("CMIR_WORKER_TOKEN", "test-worker-token")
+    os.environ.setdefault("CMIR_DATA_KEY", "test-data-key-not-for-prod-use!!")
+    os.environ.setdefault("CMIR_ADMIN_PASSWORD", "admin")
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     os.environ["CMIR_DB_PATH"] = path

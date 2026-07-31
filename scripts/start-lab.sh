@@ -7,6 +7,9 @@ mkdir -p "$PID_DIR"
 
 echo "==> Cmir lab start (CMIR_ENV=${CMIR_ENV:-test})"
 export CMIR_ENV="${CMIR_ENV:-test}"
+export CMIR_WORKER_TOKEN="${CMIR_WORKER_TOKEN:-cmir-lab-worker-token}"
+export CMIR_DATA_KEY="${CMIR_DATA_KEY:-cmir-lab-data-key-not-for-prod}"
+export CMIR_ADMIN_PASSWORD="${CMIR_ADMIN_PASSWORD:-admin}"
 
 if command -v docker >/dev/null 2>&1; then
   echo "==> MediaMTX (docker)"
@@ -27,7 +30,11 @@ if pgrep -f "apps/api_py/server.py" >/dev/null 2>&1; then
   pkill -f "apps/api_py/server.py" || true
   sleep 1
 fi
-nohup env CMIR_ENV="${CMIR_ENV:-test}" python3 "$ROOT/apps/api_py/server.py" >"$PID_DIR/api.log" 2>&1 &
+nohup env CMIR_ENV="${CMIR_ENV:-test}" \
+  CMIR_WORKER_TOKEN="${CMIR_WORKER_TOKEN}" \
+  CMIR_DATA_KEY="${CMIR_DATA_KEY}" \
+  CMIR_ADMIN_PASSWORD="${CMIR_ADMIN_PASSWORD}" \
+  python3 "$ROOT/apps/api_py/server.py" >"$PID_DIR/api.log" 2>&1 &
 echo $! >"$PID_DIR/api.pid"
 disown || true
 

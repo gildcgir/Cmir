@@ -155,9 +155,6 @@
         });
         liveView = result.view;
         hls = result.hls;
-        if (liveView) {
-          liveView.onRecognized = () => { liveView.loadConsentedFaces().catch(() => {}); };
-        }
         liveLabel.textContent = "Прямой эфир (с маской)";
       } catch (e) {
         liveLabel.textContent = e.message || "Поток недоступен";
@@ -172,7 +169,7 @@
       navigator.sendBeacon(
         `${API}/api/v1/pois/${poiId}/stream/release`,
         new Blob(
-          [JSON.stringify({ client_id: getClientId(), force: true })],
+          [JSON.stringify({ client_id: getClientId(), force: false })],
           { type: "application/json" },
         ),
       );
@@ -219,7 +216,6 @@
       if (!getToken()) return null;
       me = (await api("GET", "/api/v1/auth/me")).data;
       showControls(me);
-      if (liveView) await liveView.loadConsentedFaces();
       await loadStreams();
       return me;
     }
@@ -252,8 +248,8 @@
           },
         });
         if (res.data?.auth?.token) setToken(res.data.auth.token);
+        if (res.data?.user) localStorage.setItem("cmir_user", JSON.stringify(res.data.user));
         setStatus(res.message || "Готово", true);
-        if (liveView) await liveView.loadConsentedFaces();
         await refreshMe();
       } catch (e) {
         setStatus(e.message);

@@ -72,6 +72,10 @@ def test_bp_revoke_deletes_embeddings_only_for_that_consent(store):
     ids = {f["user_id"] for f in faces}
     assert a["user_id"] not in ids
     assert b["user_id"] in ids
+    row = store.conn.execute(
+        "SELECT face_embedding FROM consents WHERE id = ?", (a["consent"]["id"],)
+    ).fetchone()
+    assert row["face_embedding"] is None
 
 
 def test_bp_match_consented_face_prefers_best_score():

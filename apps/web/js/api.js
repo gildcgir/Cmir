@@ -6,7 +6,10 @@ export function getToken() {
 
 export function setToken(t) {
   if (t) localStorage.setItem("cmir_token", t);
-  else localStorage.removeItem("cmir_token");
+  else {
+    localStorage.removeItem("cmir_token");
+    localStorage.removeItem("cmir_user");
+  }
 }
 
 export function authHeaders(extra = {}) {

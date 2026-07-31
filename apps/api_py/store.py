@@ -16,11 +16,13 @@ from compliance import (
     LEGAL_VERSION,
     audit_log,
     blockchain_record,
+    decrypt_embedding,
     encrypt_embedding,
     ensure_legal_documents,
     list_legal_documents,
     normalize_phone,
     phone_to_email,
+    require_data_key_in_prod,
     validate_acceptances,
 )
 from database import app_env, connect, masks_dir, row_to_dict
@@ -127,6 +129,7 @@ def now_iso() -> str:
 
 class Store:
     def __init__(self) -> None:
+        require_data_key_in_prod()
         self.conn = connect()
         self.health_snapshots: Dict[str, List[dict]] = {}
         self.last_consent_id: Dict[str, str] = {}
@@ -139,9 +142,20 @@ class Store:
                 pass
 
     def _ensure_admin_user(self) -> None:
+        import os
+
+        pwd = os.environ.get("CMIR_ADMIN_PASSWORD", "").strip()
+        if app_env() == "prod":
+            if not pwd:
+                raise RuntimeError("CMIR_ADMIN_PASSWORD is required in production")
+        else:
+            pwd = pwd or "admin"
         row = self.conn.execute("SELECT id FROM users WHERE email = ?", ("admin",)).fetchone()
         if row:
-            self.conn.execute("UPDATE users SET role = 'admin' WHERE email = ?", ("admin",))
+            self.conn.execute(
+                "UPDATE users SET role = 'admin', password_hash = ? WHERE email = ?",
+                (hash_password(pwd), "admin"),
+            )
             self.conn.commit()
             self._ensure_wallet(row["id"])
             return
@@ -152,7 +166,7 @@ class Store:
             INSERT INTO users (id, email, password_hash, display_name, role, blocked_until, created_at, updated_at)
             VALUES (?, ?, ?, ?, 'admin', NULL, ?, ?)
             """,
-            (uid, "admin", hash_password("admin"), "Administrator", t, t),
+            (uid, "admin", hash_password(pwd), "Administrator", t, t),
         )
         self.conn.commit()
         self._ensure_wallet(uid)
@@ -956,7 +970,6 @@ class Store:
         t = now_iso()
         primary = templates[0]["embedding"]
         emb_json = encrypt_embedding(primary)
-        emb_plain = json.dumps(primary)
         self.conn.execute(
             """
             INSERT INTO consents (id, user_id, poi_id, wallet_address, face_embedding,
@@ -967,7 +980,7 @@ class Store:
         )
         self.conn.execute(
             "INSERT INTO poi_embeddings (poi_id, consent_id, embedding_json) VALUES (?, ?, ?)",
-            (poi_id, cid, emb_plain),
+            (poi_id, cid, emb_json),
         )
         for tpl in templates:
             self.conn.execute(
@@ -984,7 +997,7 @@ class Store:
                     tpl["pose"],
                     tpl.get("yaw"),
                     tpl.get("pitch"),
-                    json.dumps(tpl["embedding"]),
+                    encrypt_embedding(tpl["embedding"]),
                     t,
                 ),
             )
@@ -1177,7 +1190,10 @@ class Store:
         if not row:
             raise KeyError("consent not found")
         t = now_iso()
-        self.conn.execute("UPDATE consents SET revoked_at = ? WHERE id = ?", (t, consent_id))
+        self.conn.execute(
+            "UPDATE consents SET revoked_at = ?, face_embedding = NULL WHERE id = ?",
+            (t, consent_id),
+        )
         self.conn.execute(
             "DELETE FROM poi_embeddings WHERE poi_id = ? AND consent_id = ?",
             (poi_id, consent_id),
@@ -1203,10 +1219,9 @@ class Store:
         ).fetchall()
         out = []
         for r in rows:
-            try:
-                out.append(json.loads(r["embedding_json"]))
-            except json.JSONDecodeError:
-                pass
+            emb = decrypt_embedding(r["embedding_json"] or "")
+            if emb and len(emb) == PATCH_DIM:
+                out.append(emb)
         if out:
             return out
         rows = self.conn.execute(
@@ -1218,10 +1233,9 @@ class Store:
             (poi_id,),
         ).fetchall()
         for r in rows:
-            try:
-                out.append(json.loads(r["embedding_json"]))
-            except json.JSONDecodeError:
-                pass
+            emb = decrypt_embedding(r["embedding_json"] or "")
+            if emb and len(emb) == PATCH_DIM:
+                out.append(emb)
         return out
 
     def global_consented_faces(self) -> List[dict]:
@@ -1245,11 +1259,8 @@ class Store:
         by_user: Dict[str, dict] = {}
         for r in rows:
             uid = r["user_id"]
-            try:
-                emb = json.loads(r["embedding_json"])
-            except json.JSONDecodeError:
-                continue
-            if len(emb) != PATCH_DIM:
+            emb = decrypt_embedding(r["embedding_json"] or "")
+            if not emb or len(emb) != PATCH_DIM:
                 continue
             entry = by_user.setdefault(
                 uid,
@@ -1287,11 +1298,8 @@ class Store:
             uid = r["user_id"]
             if uid in by_user:
                 continue
-            try:
-                emb = json.loads(r["embedding_json"])
-            except json.JSONDecodeError:
-                continue
-            if len(emb) != PATCH_DIM:
+            emb = decrypt_embedding(r["embedding_json"] or "")
+            if not emb or len(emb) != PATCH_DIM:
                 continue
             by_user[uid] = {
                 "user_id": uid,
@@ -1302,6 +1310,50 @@ class Store:
             }
 
         return list(by_user.values())
+
+    def match_face_embedding(
+        self,
+        embedding: List[float],
+        *,
+        threshold: float = 0.82,
+        hold_threshold: float = 0.75,
+        prior_user_id: str = "",
+    ) -> Optional[dict]:
+        """Server-side match — returns identity without exposing gallery vectors."""
+        if not embedding or len(embedding) != PATCH_DIM:
+            return None
+
+        def _norm(v: List[float]) -> List[float]:
+            n = sum(x * x for x in v) ** 0.5
+            if n < 1e-9:
+                return v
+            return [x / n for x in v]
+
+        def _cosine(a: List[float], b: List[float]) -> float:
+            if len(a) != len(b):
+                return 0.0
+            return float(sum(x * y for x, y in zip(a, b)))
+
+        query = _norm(embedding)
+        faces = self.global_consented_faces()
+        best: Optional[dict] = None
+        best_score = hold_threshold if prior_user_id else threshold
+        for face in faces:
+            thr = hold_threshold if prior_user_id and face["user_id"] == prior_user_id else threshold
+            score = 0.0
+            for emb in face.get("embeddings") or []:
+                score = max(score, _cosine(query, _norm(emb)))
+            if not face.get("embeddings") and face.get("embedding"):
+                score = _cosine(query, _norm(face["embedding"]))
+            if score >= thr and score >= best_score:
+                best_score = score
+                best = {
+                    "matched": True,
+                    "user_id": face["user_id"],
+                    "display_name": face.get("display_name") or "",
+                    "score": round(score, 4),
+                }
+        return best
 
     def filter_poi_ids(self, city: Optional[str], country: Optional[str]) -> List[str]:
         q = "SELECT id, city, country FROM pois"

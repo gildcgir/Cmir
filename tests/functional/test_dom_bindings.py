@@ -132,7 +132,7 @@ def test_user_hides_kiosk_when_consented(web_root: Path):
     js = (web_root / "js" / "user.js").read_text(encoding="utf-8")
     assert "updateKioskLink" in js
     assert "userHasConsent" in js
-    assert "loadConsentedFaces" in js
+    assert "face-match" in (web_root / "js" / "live-camera.js").read_text(encoding="utf-8")
     assert "renderConsents" in js
 
 
