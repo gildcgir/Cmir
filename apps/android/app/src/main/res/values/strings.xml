@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cmir</string>
+    <!-- Production host after deploy. Emulator lab: http://10.0.2.2:3000/ -->
+    <string name="cmir_web_base">https://app.cmir.live/</string>
+</resources>

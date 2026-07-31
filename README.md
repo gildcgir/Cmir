@@ -1,19 +1,22 @@
 # Cmir
 
-Live venue map with privacy-first face masking, consent kiosk, wallets (ST/UT), and Android shell.
-
-Main application code lives in [`smir/`](./smir/) (legacy package path; product name: **Cmir**).
+Privacy-first live venue map: consent kiosk, multi-pose face profiles, face masking on streams, wallets (ST/UT), Android shell.
 
 ## Quick start
 
 ```bash
-cd smir
 bash scripts/start-lab.sh
 ```
 
 - Web: http://127.0.0.1:3000/
 - API: http://127.0.0.1:8090/health
+- Docs: [`docs/`](./docs/)
 
-## Docs
+## Layout
 
-See [`smir/docs/`](./smir/docs/) — architecture, use cases, GoPro, Android Play prep.
+- `apps/web` — map / account / admin / performance
+- `apps/consent-kiosk` — multi-pose face enrollment
+- `apps/api_py` — Python API + SQLite
+- `apps/face-worker` — MediaPipe masking / matching (`cmir_face`)
+- `apps/android` — Google Play WebView shell (`com.cmir.app`)
+- `apps/ingest` — MediaMTX

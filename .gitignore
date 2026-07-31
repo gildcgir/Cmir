@@ -1,7 +1,6 @@
 /.DS_Store
 /TheHotPotSpot
 /cuekit
-/docs
 /the-hot-pot-spot-docs
 /the-hot-pot-spot-private
 /the-hot-pot-spot-public
@@ -21,3 +20,10 @@
 **/.env
 **/.env.*
 **/camera-publish.log
+**/__pycache__/
+**/.venv/
+**/target/
+**/.pytest_cache/
+apps/web/media/
+apps/ingest/samples/
+*.mp4

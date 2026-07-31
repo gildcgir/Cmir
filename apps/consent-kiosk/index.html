@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cmir — регистрация и согласие</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0a1628;
+      color: #e8eef7;
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1.5rem;
+      display: grid;
+      gap: 1.25rem;
+      grid-template-columns: 1fr 1fr;
+    }
+    @media (max-width: 860px) { .wrap { grid-template-columns: 1fr; } }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    .sub { opacity: 0.75; font-size: 0.9rem; margin-bottom: 1rem; }
+    .card {
+      background: #132238;
+      border-radius: 16px;
+      padding: 1.25rem;
+      border: 1px solid #243552;
+    }
+    .video-box {
+      position: relative;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #000;
+      aspect-ratio: 16/10;
+    }
+    .video-box .mask-overlay-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 2;
+      background: #000;
+    }
+    video.live-source-hidden {
+      position: absolute; width: 1px; height: 1px; opacity: 0;
+      pointer-events: none; z-index: -1;
+    }
+    .kiosk-locked { opacity: 0.55; pointer-events: none; }
+    video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .video-label {
+      position: absolute; bottom: 8px; left: 8px;
+      background: rgba(0,0,0,0.55); padding: 4px 10px; border-radius: 8px;
+      font-size: 0.75rem;
+    }
+    label { display: block; font-size: 0.85rem; margin: 0.75rem 0 0.25rem; opacity: 0.9; }
+    input, select {
+      width: 100%; padding: 0.65rem 0.75rem; border-radius: 10px;
+      border: 1px solid #3a4d66; background: #0f1419; color: #fff;
+    }
+    .docs { margin-top: 0.75rem; max-height: 280px; overflow-y: auto; }
+    .doc-row {
+      display: grid; grid-template-columns: 1fr auto; gap: 0.5rem;
+      align-items: start; padding: 0.6rem 0; border-bottom: 1px solid #243552;
+    }
+    .doc-row:last-child { border-bottom: none; }
+    .doc-title { font-size: 0.88rem; font-weight: 600; }
+    .doc-link { font-size: 0.78rem; color: #6ecfff; cursor: pointer; margin-top: 0.2rem; display: inline-block; }
+    .doc-check { display: flex; align-items: center; gap: 0.35rem; font-size: 0.82rem; white-space: nowrap; }
+    .doc-check input { width: auto; }
+    .btn-main {
+      width: 100%; margin-top: 1rem; padding: 1rem;
+      font-size: 1.1rem; font-weight: 700; border: none; border-radius: 12px;
+      background: linear-gradient(135deg, #2ecc71, #27ae60); color: #062012;
+      cursor: pointer;
+    }
+    .btn-main:disabled { opacity: 0.45; cursor: not-allowed; }
+    #status { margin-top: 0.75rem; font-size: 0.85rem; min-height: 1.2em; }
+    #status.err { color: #ff8a8a; }
+    #status.ok { color: #7dffb0; }
+    .modal {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      align-items: center; justify-content: center; z-index: 50; padding: 1rem;
+    }
+    .modal.open { display: flex; }
+    .modal-inner {
+      background: #132238; border-radius: 14px; max-width: 560px; width: 100%;
+      max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;
+    }
+    .modal-head { padding: 1rem; border-bottom: 1px solid #243552; display: flex; justify-content: space-between; }
+    .modal-body { padding: 1rem; overflow-y: auto; font-size: 0.85rem; line-height: 1.55; white-space: pre-wrap; }
+    .modal-close { background: none; border: none; color: #fff; font-size: 1.25rem; cursor: pointer; }
+    a { color: #6ecfff; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1>Камера согласия</h1>
+      <p class="sub">До регистрации ваше лицо отображается с маской на всех камерах заведения.</p>
+      <div class="video-box privacy-composite">
+        <video id="live" class="live-source-hidden" autoplay playsinline muted></video>
+        <canvas id="liveMaskCanvas" class="mask-overlay-canvas"></canvas>
+        <span class="video-label" id="liveLabel">Подключение…</span>
+      </div>
+      <p style="margin-top:0.75rem;font-size:0.8rem;opacity:0.7" id="poiName"></p>
+    </section>
+
+    <section class="card" id="panelRegister">
+      <h1>Регистрация</h1>
+      <p class="sub">Заполните данные, подтвердите документы и снимите профиль лица со всех ракурсов (прямо / влево / вправо / вверх / вниз).</p>
+
+      <div id="enrollBox" style="margin:0.75rem 0;padding:0.75rem;border-radius:12px;background:#0f1a2a;border:1px solid #243552;display:none">
+        <p id="enrollStatus" style="font-size:0.9rem;margin-bottom:0.5rem">Подготовка съёмки лица…</p>
+        <div id="enrollSteps" style="display:flex;gap:0.35rem;flex-wrap:wrap"></div>
+      </div>
+
+      <label for="fullName">ФИО</label>
+      <input id="fullName" placeholder="Иванов Иван Иванович" autocomplete="name" />
+
+      <label for="phone">Телефон</label>
+      <input id="phone" type="tel" placeholder="+995 5XX XX XX XX" autocomplete="tel" />
+
+      <label for="menuItem">Любимый пункт меню заведения</label>
+      <select id="menuItem"><option value="">Загрузка…</option></select>
+
+      <div class="docs" id="docsList"></div>
+
+      <button type="button" class="btn-main" id="btnRegister" disabled>Регистрация и начало веселья!</button>
+      <div id="status"></div>
+      <p id="accountLink" style="margin-top:0.75rem;display:none"><a href="../index.html#account">Личный кабинет →</a></p>
+    </section>
+  </div>
+
+  <div class="modal" id="docModal">
+    <div class="modal-inner">
+      <div class="modal-head">
+        <strong id="modalTitle">Документ</strong>
+        <button type="button" class="modal-close" id="modalClose">×</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <p style="text-align:center;padding:1rem;font-size:0.8rem;opacity:0.6">
+    <a href="../index.html">← На главную</a>
+  </p>
+
+  <script type="module">
+    import { getToken, setToken } from '../js/api.js';
+    import { startMaskedPageCamera } from '../js/live-camera.js';
+    import { ENROLL_POSES, PoseEnrollment, yawPitchFromBbox, yawPitchFromMatrix } from '../js/face-enroll.js';
+
+    const API = localStorage.getItem('cmir_api') || 'http://localhost:8090';
+    const qs = new URLSearchParams(location.search);
+    let poiId = qs.get('poi') || localStorage.getItem('cmir_kiosk_poi') || '';
+    let documents = [];
+    const DOC_KEYS = [
+      'terms_of_service',
+      'privacy_policy',
+      'personal_data_consent',
+      'biometric_data_consent',
+      'wallet_agreement',
+    ];
+    const accepted = Object.fromEntries(DOC_KEYS.map((k) => [k, false]));
+
+    const live = document.getElementById('live');
+    const liveLabel = document.getElementById('liveLabel');
+    const btn = document.getElementById('btnRegister');
+    const statusEl = document.getElementById('status');
+    let hls = null;
+    let liveView = null;
+    let kioskLocked = false;
+    let faceDetector = null;
+    let lastFaceBox = null;
+
+    function getClientId() {
+      let id = sessionStorage.getItem('cmir_kiosk_client');
+      if (!id) {
+        id = globalThis.crypto?.randomUUID?.() || `k-${Date.now()}`;
+        sessionStorage.setItem('cmir_kiosk_client', id);
+      }
+      return id;
+    }
+
+    async function acquireStream() {
+      // browser USB — не запускаем ffmpeg
+      await resolvePoi();
+    }
+
+    function releaseStream() {
+      if (!poiId) return;
+      navigator.sendBeacon(
+        `${API}/api/v1/pois/${poiId}/stream/release`,
+        new Blob(
+          [JSON.stringify({ client_id: getClientId(), force: true })],
+          { type: 'application/json' },
+        ),
+      );
+    }
+
+    function stopEverything() {
+      stopLive();
+      releaseStream();
+    }
+
+    window.addEventListener('pagehide', stopEverything);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') stopEverything();
+    });
+
+    async function api(method, path, body) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(API + path, opts);
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || res.statusText);
+      return json;
+    }
+
+    function setStatus(msg, ok) {
+      statusEl.textContent = msg || '';
+      statusEl.className = ok ? 'ok' : msg ? 'err' : '';
+    }
+
+    function userHasConsent(u) {
+      return Array.isArray(u?.consents) && u.consents.length > 0;
+    }
+
+    function lockKioskRegistered(name, message) {
+      kioskLocked = true;
+      btn.disabled = true;
+      btn.textContent = 'Вы уже зарегистрированы';
+      document.getElementById('panelRegister').classList.add('kiosk-locked');
+      document.getElementById('fullName').disabled = true;
+      document.getElementById('phone').disabled = true;
+      document.getElementById('menuItem').disabled = true;
+      document.querySelectorAll('#docsList input').forEach((cb) => { cb.disabled = true; });
+      document.getElementById('accountLink').style.display = 'block';
+      setStatus(message || `${name || 'Пользователь'}: согласие активно, маска не применяется.`, true);
+      liveLabel.textContent = name ? `${name} — в кадре без маски` : 'Согласие уже дано';
+      if (liveView) liveView.loadConsentedFaces().catch(() => {});
+    }
+
+    function wireLiveView(view) {
+      if (!view) return;
+      view.onRecognized = ({ name }) => {
+        if (name && !kioskLocked) lockKioskRegistered(name, `${name}: вы распознаны, регистрация не нужна.`);
+      };
+    }
+
+    async function checkExistingRegistration() {
+      const token = getToken();
+      if (!token) return;
+      try {
+        const me = (await api('GET', '/api/v1/auth/me')).data;
+        if (userHasConsent(me)) {
+          lockKioskRegistered(me.display_name, 'Вы уже вошли в аккаунт с активным согласием.');
+        }
+      } catch (_) {}
+    }
+
+    function updateBtn() {
+      if (kioskLocked) {
+        btn.disabled = true;
+        return;
+      }
+      const formOk = document.getElementById('fullName').value.trim()
+        && document.getElementById('phone').value.trim()
+        && document.getElementById('menuItem').value;
+      const docsOk = DOC_KEYS.every((k) => accepted[k]);
+      btn.disabled = !(formOk && docsOk);
+    }
+
+    function renderDocs() {
+      const box = document.getElementById('docsList');
+      box.innerHTML = documents.map((d) => `
+        <div class="doc-row" data-type="${d.doc_type}">
+          <div>
+            <div class="doc-title">${d.title}</div>
+            <span class="doc-link" data-open="${d.doc_type}">Прочитать документ</span>
+          </div>
+          <label class="doc-check">
+            <input type="checkbox" data-doc="${d.doc_type}" />
+            Согласен
+          </label>
+        </div>
+      `).join('');
+      box.querySelectorAll('[data-open]').forEach((el) => {
+        el.onclick = () => openDoc(el.dataset.open);
+      });
+      box.querySelectorAll('input[data-doc]').forEach((cb) => {
+        cb.onchange = () => {
+          accepted[cb.dataset.doc] = cb.checked;
+          updateBtn();
+        };
+      });
+    }
+
+    function openDoc(type) {
+      const doc = documents.find((d) => d.doc_type === type);
+      if (!doc) return;
+      document.getElementById('modalTitle').textContent = doc.title;
+      document.getElementById('modalBody').textContent = doc.content;
+      document.getElementById('docModal').classList.add('open');
+    }
+    document.getElementById('modalClose').onclick = () => document.getElementById('docModal').classList.remove('open');
+
+    function pickKioskPoi(list) {
+      if (poiId) {
+        const hit = list.find((p) => p.id === poiId);
+        if (hit) return hit;
+      }
+      const local = list.find((p) =>
+        (p.cameras || []).some((c) => c.is_active && c.source_type === 'local_usb'),
+      );
+      if (local) return local;
+      const saved = localStorage.getItem('cmir_kiosk_poi');
+      if (saved) {
+        const hit = list.find((p) => p.id === saved);
+        if (hit) return hit;
+      }
+      return (
+        list.find((p) => (p.cameras || []).some((c) => c.role === 'consent' && c.is_active))
+        || list[0]
+      );
+    }
+
+    function previewCamera(poi) {
+      const cams = (poi?.cameras || []).filter((c) => c.is_active);
+      return cams.find((c) => c.role === 'consent') || cams.find((c) => c.is_preview) || cams[0] || null;
+    }
+
+    async function resolvePoi() {
+      const res = await fetch(`${API}/api/v1/pois`);
+      const json = await res.json();
+      const list = json.data || [];
+      const poi = pickKioskPoi(list);
+      if (!poi) throw new Error('Нет места (POI). Создайте в админке.');
+      poiId = poi.id;
+      localStorage.setItem('cmir_kiosk_poi', poiId);
+      document.getElementById('poiName').textContent = `Заведение: ${poi.name}`;
+    }
+
+    async function loadMenu() {
+      const items = (await api('GET', `/api/v1/pois/${poiId}/menu-items`)).data || [];
+      const sel = document.getElementById('menuItem');
+      sel.innerHTML = '<option value="">— выберите —</option>'
+        + items.map((i) => `<option value="${i}">${i}</option>`).join('');
+      sel.onchange = updateBtn;
+    }
+
+    async function loadDocs() {
+      documents = (await api('GET', '/api/v1/legal/documents')).data || [];
+      renderDocs();
+    }
+
+    function stopHls() {
+      if (hls) { hls.destroy(); hls = null; }
+      live.removeAttribute('src');
+    }
+
+    function stopLive() {
+      if (liveView) {
+        liveView.stop();
+        liveView = null;
+      }
+      stopHls();
+    }
+
+    async function startLiveStream() {
+      const poisRes = await fetch(`${API}/api/v1/pois`);
+      const poi = (await poisRes.json()).data?.find((p) => p.id === poiId);
+      const cam = previewCamera(poi);
+      if (!cam) {
+        liveLabel.textContent = 'Нет камеры у места';
+        return;
+      }
+      liveLabel.textContent = 'Подключение…';
+      stopLive();
+      const maskCanvas = document.getElementById('liveMaskCanvas');
+      if (maskCanvas) maskCanvas.style.opacity = '0';
+      try {
+        const fallbacks = (poi?.cameras || []).filter((c) => c.is_active && c.id !== cam?.id);
+        const result = await startMaskedPageCamera({
+          video: live,
+          canvas: document.getElementById('liveMaskCanvas'),
+          cam,
+          poi,
+          fallbackCams: fallbacks,
+          apiBase: API,
+          clientId: getClientId(),
+          usbOnly: true,
+          onStatus: (msg) => { if (msg) liveLabel.textContent = msg; },
+        });
+        liveView = result.view;
+        hls = result.hls;
+        wireLiveView(liveView);
+        liveLabel.textContent = kioskLocked ? liveLabel.textContent : 'Прямой эфир (с маской)';
+      } catch (e) {
+        liveLabel.textContent = e.message || 'Поток недоступен';
+        setTimeout(() => startLiveStream(), 3000);
+      }
+    }
+
+    async function initFaceDetector() {
+      try {
+        const mp = await import('https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4/face_detection.js');
+        const { FaceDetection } = mp;
+        faceDetector = new FaceDetection({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4/${f}` });
+        faceDetector.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
+        faceDetector.onResults((res) => {
+          const det = res.detections?.[0];
+          if (!det?.boundingBox) { lastFaceBox = null; return; }
+          const bb = det.boundingBox;
+          lastFaceBox = { x: bb.xCenter - bb.width / 2, y: bb.yCenter - bb.height / 2, w: bb.width, h: bb.height };
+        });
+        const tick = async () => {
+          if (live.readyState >= 2 && faceDetector) {
+            await faceDetector.send({ image: live });
+          }
+          requestAnimationFrame(tick);
+        };
+        tick();
+      } catch (_) {
+        console.warn('MediaPipe unavailable, using center crop');
+      }
+    }
+
+    function captureEmbedding() {
+      const w = 32, h = 32;
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = live.videoWidth || 640;
+      canvas.height = live.videoHeight || 480;
+      ctx.drawImage(live, 0, 0, canvas.width, canvas.height);
+      let sx = 0, sy = 0, sw = canvas.width, sh = canvas.height;
+      if (lastFaceBox) {
+        sx = Math.max(0, lastFaceBox.x * canvas.width);
+        sy = Math.max(0, lastFaceBox.y * canvas.height);
+        sw = Math.min(canvas.width - sx, lastFaceBox.w * canvas.width);
+        sh = Math.min(canvas.height - sy, lastFaceBox.h * canvas.height);
+      } else {
+        const side = Math.min(canvas.width, canvas.height) * 0.5;
+        sx = (canvas.width - side) / 2;
+        sy = (canvas.height - side) / 2;
+        sw = sh = side;
+      }
+      const out = document.createElement('canvas');
+      out.width = w; out.height = h;
+      out.getContext('2d').drawImage(canvas, sx, sy, sw, sh, 0, 0, w, h);
+      const img = out.getContext('2d').getImageData(0, 0, w, h);
+      const gray = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        const o = i * 4;
+        gray[i] = (img.data[o] + img.data[o + 1] + img.data[o + 2]) / (3 * 255);
+      }
+      let norm = 0;
+      for (let i = 0; i < gray.length; i++) norm += gray[i] * gray[i];
+      norm = Math.sqrt(norm) || 1;
+      return Array.from(gray, (v) => v / norm);
+    }
+
+    let lastPose = { yaw: 0, pitch: 0 };
+    let landmarker = null;
+
+    function renderEnrollSteps(donePoses = []) {
+      const box = document.getElementById('enrollSteps');
+      if (!box) return;
+      box.innerHTML = ENROLL_POSES.map((p) => {
+        const ok = donePoses.includes(p.id);
+        return `<span style="padding:0.25rem 0.55rem;border-radius:999px;font-size:0.75rem;background:${ok ? '#1e6b45' : '#243552'}">${ok ? '✓ ' : ''}${p.id}</span>`;
+      }).join('');
+    }
+
+    async function initLandmarker() {
+      try {
+        const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14');
+        const { FaceLandmarker, FilesetResolver } = vision;
+        const files = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm',
+        );
+        landmarker = await FaceLandmarker.createFromOptions(files, {
+          baseOptions: {
+            modelAssetPath:
+              'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'VIDEO',
+          numFaces: 4,
+          outputFacialTransformationMatrixes: true,
+        });
+      } catch (e) {
+        console.warn('FaceLandmarker unavailable', e);
+        landmarker = null;
+      }
+    }
+
+    function samplePose() {
+      if (landmarker && live.readyState >= 2) {
+        try {
+          const res = landmarker.detectForVideo(live, performance.now());
+          const m = res.facialTransformationMatrixes?.[0]?.data || res.facialTransformationMatrixes?.[0];
+          if (m) {
+            lastPose = yawPitchFromMatrix(m);
+            return lastPose;
+          }
+        } catch (_) {}
+      }
+      const bb = liveView?.lastFaceBbox;
+      if (bb) {
+        lastPose = yawPitchFromBbox(bb, live.videoWidth, live.videoHeight);
+        return lastPose;
+      }
+      return lastPose;
+    }
+
+    btn.onclick = async () => {
+      if (kioskLocked) return;
+      btn.disabled = true;
+      const enrollBox = document.getElementById('enrollBox');
+      const enrollStatus = document.getElementById('enrollStatus');
+      enrollBox.style.display = 'block';
+      renderEnrollSteps([]);
+      setStatus('Съёмка профиля лица: покрутите головой по подсказкам…');
+      try {
+        if (live.readyState < 2 && !liveView) throw new Error('Дождитесь появления изображения с камеры');
+        if (!landmarker) await initLandmarker();
+        const enrollment = new PoseEnrollment({
+          onStatus: (msg) => {
+            enrollStatus.textContent = msg;
+            setStatus(msg);
+            renderEnrollSteps(enrollment.templates.map((t) => t.pose));
+          },
+          captureSignature: () => liveView?.getLastFaceSignature() || captureEmbedding(),
+          getPose: samplePose,
+        });
+        const templates = await enrollment.run();
+        if (templates.length < ENROLL_POSES.length) {
+          throw new Error('Не удалось снять все ракурсы лица — попробуйте ещё раз');
+        }
+        setStatus('Сохранение данных и биометрии…');
+        const payload = {
+          full_name: document.getElementById('fullName').value.trim(),
+          phone: document.getElementById('phone').value.trim(),
+          favorite_menu_item: document.getElementById('menuItem').value,
+          face_embedding: templates[0].embedding,
+          face_embeddings: templates,
+          acceptances: Object.fromEntries(DOC_KEYS.map((k) => [k, true])),
+        };
+        const res = await api('POST', `/api/v1/pois/${poiId}/kiosk-register`, payload);
+        if (res.data?.auth?.token) setToken(res.data.auth.token);
+        document.getElementById('accountLink').style.display = 'block';
+        lockKioskRegistered(
+          document.getElementById('fullName').value.trim() || res.data?.user?.display_name,
+          `${res.message}\nКошелёк: ${res.data.wallet?.address || '—'}\nПрофиль лица: ${templates.length} ракурсов\nBlockchain: ${res.data.blockchain?.tx_hash || '—'}${
+            res.data?.temporary_password
+              ? `\nВход позже: телефон ${res.data.phone} · пароль ${res.data.temporary_password}`
+              : ''
+          }`,
+        );
+      } catch (e) {
+        setStatus(e.message);
+        if (!kioskLocked) btn.disabled = false;
+      }
+    };
+
+    ['input', 'change'].forEach((ev) => {
+      document.getElementById('fullName').addEventListener(ev, updateBtn);
+      document.getElementById('phone').addEventListener(ev, updateBtn);
+    });
+
+    try {
+      await checkExistingRegistration();
+      await acquireStream();
+      await Promise.all([loadMenu(), loadDocs(), startLiveStream()]);
+      updateBtn();
+    } catch (e) {
+      setStatus(e.message);
+    }
+  </script>
+</body>
+</html>
