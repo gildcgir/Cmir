@@ -2,58 +2,111 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Cmir — трансляция</title>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
+  <script src="vendor/hls/hls.min.js" defer></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-    video { width: 100vw; height: 100vh; object-fit: contain; background: #000; }
+    .stage { position: absolute; inset: 0; }
+    video, canvas {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover; background: #000;
+    }
+    video.live-source-hidden {
+      position: absolute !important;
+      width: 1px !important; height: 1px !important;
+      opacity: 0 !important; pointer-events: none;
+    }
     .title {
-      position: fixed; top: 12px; left: 16px; color: #fff;
-      font: 600 1rem system-ui, sans-serif; text-shadow: 0 1px 4px #000;
-      z-index: 2; max-width: 70%;
+      position: fixed; top: max(12px, env(safe-area-inset-top)); left: 16px; right: 72px;
+      color: #fff; font: 600 1rem system-ui, sans-serif;
+      text-shadow: 0 1px 4px #000; z-index: 2;
     }
     .status {
-      position: fixed; bottom: 12px; left: 16px; color: #ccc;
-      font: 0.85rem system-ui, sans-serif; text-shadow: 0 1px 4px #000;
-      z-index: 2;
+      position: fixed; bottom: max(12px, env(safe-area-inset-bottom)); left: 16px; right: 16px;
+      color: #ccc; font: 0.85rem system-ui, sans-serif;
+      text-shadow: 0 1px 4px #000; z-index: 2;
+    }
+    .back {
+      position: fixed; top: max(10px, env(safe-area-inset-top)); right: 12px;
+      z-index: 3; border: 0; border-radius: 10px;
+      background: rgba(20,28,40,.85); color: #e8edf5;
+      padding: .55rem .85rem; font: 600 .9rem system-ui, sans-serif;
     }
   </style>
 </head>
 <body>
+  <button type="button" class="back" id="btnBack">← Назад</button>
   <p class="title" id="title"></p>
   <p class="status" id="status">Подключение…</p>
-  <video id="v" controls autoplay muted playsinline></video>
+  <div class="stage privacy-composite">
+    <video id="v" class="live-source-hidden" muted playsinline autoplay></video>
+    <canvas id="mask"></canvas>
+  </div>
   <script type="module">
-    const API = localStorage.getItem("cmir_api") || "http://localhost:8090";
+    import { LiveCameraView } from "./js/live-camera.js?v=camfix9";
+
+    const API = localStorage.getItem("cmir_api") || (
+      (location.hostname === "localhost" || location.hostname === "127.0.0.1")
+        ? "http://127.0.0.1:8090"
+        : `http://${location.hostname}:8090`
+    );
     const p = new URLSearchParams(location.search);
-    const url = p.get("url");
-    const poiId = p.get("poi");
+    const url = p.get("url") || "";
+    const mode = p.get("mode") || (url ? "hls" : "device");
+    const facing = p.get("facing") || "user";
+    const poiId = p.get("poi") || "";
     const clientId = p.get("client") || sessionStorage.getItem("cmir_client_id") || "fullscreen";
     const name = p.get("name") || "Live";
+    const maskPath = p.get("mask") || "";
     document.getElementById("title").textContent = name;
+    document.getElementById("btnBack").onclick = () => {
+      if (history.length > 1) history.back();
+      else location.href = "./";
+    };
+
     const video = document.getElementById("v");
+    const canvas = document.getElementById("mask");
     const statusEl = document.getElementById("status");
     let hls = null;
+    let liveView = null;
+
+    function sizeCanvas() {
+      canvas.width = canvas.clientWidth || window.innerWidth;
+      canvas.height = canvas.clientHeight || window.innerHeight;
+    }
+    sizeCanvas();
+    window.addEventListener("resize", sizeCanvas);
 
     async function acquire() {
       if (!poiId) return;
       await fetch(`${API}/api/v1/pois/${poiId}/stream/acquire`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ client_id: clientId, wait_hls: true }),
+        body: JSON.stringify({ client_id: clientId, wait_hls: mode === "hls" }),
       });
     }
 
     function release() {
       if (!poiId) return;
-      navigator.sendBeacon(
+      navigator.sendBeacon?.(
         `${API}/api/v1/pois/${poiId}/stream/release`,
         new Blob([JSON.stringify({ client_id: clientId })], { type: "application/json" }),
       );
+      liveView?.stop();
+      liveView = null;
+      if (hls) { hls.destroy(); hls = null; }
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach((t) => t.stop());
+        video.srcObject = null;
+      }
     }
 
     function playHls(streamUrl) {
+      video.classList.remove("live-source-hidden");
+      canvas.style.display = "none";
       if (!streamUrl) {
         statusEl.textContent = "Нет URL потока";
         return;
@@ -85,21 +138,44 @@
         video.play().catch(() => {});
         statusEl.textContent = "Live";
       } else {
-        statusEl.textContent = "HLS не поддерживается в этом браузере";
+        statusEl.textContent = "HLS не поддерживается";
       }
     }
 
-    window.addEventListener("pagehide", release);
+    async function playDevice() {
+      statusEl.textContent = "Фронтальная камера · маски";
+      canvas.style.display = "";
+      video.classList.add("live-source-hidden");
+      sizeCanvas();
+      liveView = new LiveCameraView(video, canvas);
+      const maskUrl = maskPath
+        ? (maskPath.startsWith("http") ? maskPath : `${API}${maskPath}`)
+        : "";
+      await liveView.start({
+        facingMode: facing,
+        maskImageUrl: maskUrl,
+        apiBase: API,
+        cameraId: "",
+        compositeMode: true,
+      });
+      statusEl.textContent = "Фронтальная камера · маски и подписи";
+    }
 
-    if (!url) {
-      statusEl.textContent = "Нет URL потока";
-    } else {
-      acquire()
-        .then(() => playHls(url))
-        .catch((e) => {
-          statusEl.textContent = e.message || "Ошибка подключения";
-          playHls(url);
-        });
+    window.addEventListener("pagehide", release);
+    window.addEventListener("beforeunload", release);
+
+    try {
+      if (mode === "device" || !url) {
+        await acquire().catch(() => {});
+        await playDevice();
+      } else {
+        await acquire().catch(() => {});
+        playHls(url);
+      }
+    } catch (e) {
+      console.error(e);
+      statusEl.textContent = e.message || "Ошибка подключения";
+      if (url) playHls(url);
     }
   </script>
 </body>

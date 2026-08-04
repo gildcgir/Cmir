@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Cmir — регистрация и согласие</title>
+  <script src="../vendor/hls/hls.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0a1628;
+      color: #e8eef7;
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1.5rem;
+      display: grid;
+      gap: 1.25rem;
+      grid-template-columns: 1fr 1fr;
+    }
+    @media (max-width: 860px) { .wrap { grid-template-columns: 1fr; } }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    .sub { opacity: 0.75; font-size: 0.9rem; margin-bottom: 1rem; }
+    .card {
+      background: #132238;
+      border-radius: 16px;
+      padding: 1.25rem;
+      border: 1px solid #243552;
+    }
+    .video-stage {
+      position: relative;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #0b1220;
+      aspect-ratio: 16/10;
+      border: 1px solid #243552;
+    }
+    .video-box {
+      position: absolute;
+      inset: 0;
+      background: #000;
+      display: none;
+    }
+    .video-box.active { display: block; }
+    .video-box .mask-overlay-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 2;
+      background: #000;
+    }
+    video.live-source-hidden {
+      position: absolute; width: 1px; height: 1px; opacity: 0;
+      pointer-events: none; z-index: -1;
+    }
+    .kiosk-locked { opacity: 0.55; pointer-events: none; }
+    video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .video-label {
+      position: absolute; bottom: 8px; left: 8px; right: 8px;
+      background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 8px;
+      font-size: 0.85rem; z-index: 3; line-height: 1.35;
+    }
+    .start-overlay {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 0.85rem; padding: 1.25rem; text-align: center;
+      background: linear-gradient(160deg, #102038, #0a1628);
+      z-index: 4;
+    }
+    .start-overlay.hidden { display: none; }
+    .start-overlay p { opacity: 0.8; font-size: 0.9rem; max-width: 22rem; }
+    .countdown-overlay {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      z-index: 6; pointer-events: none;
+      font-weight: 800; font-size: clamp(4.5rem, 22vw, 8rem);
+      color: rgba(255, 255, 255, 0.55);
+      text-shadow: 0 4px 28px rgba(0,0,0,0.55);
+      letter-spacing: -0.04em;
+      transition: opacity .12s ease, transform .12s ease;
+    }
+    .countdown-overlay.hidden { display: none; }
+    .countdown-overlay.snap {
+      color: rgba(126, 255, 176, 0.7);
+      transform: scale(1.08);
+    }
+    .btn-start, .btn-main {
+      width: 100%; max-width: 280px; padding: 1rem 1.1rem;
+      font-size: 1.05rem; font-weight: 700; border: none; border-radius: 12px;
+      background: linear-gradient(135deg, #2ecc71, #27ae60); color: #062012;
+      cursor: pointer;
+    }
+    .btn-main { max-width: none; margin-top: 1rem; }
+    .btn-main:disabled, .btn-start:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-secondary {
+      background: #2a3548; color: #e8eef7; border: 1px solid #3a4d66;
+      border-radius: 10px; padding: 0.55rem 0.9rem; cursor: pointer; font-weight: 600;
+    }
+    label { display: block; font-size: 0.85rem; margin: 0.75rem 0 0.25rem; opacity: 0.9; }
+    input, select {
+      width: 100%; padding: 0.65rem 0.75rem; border-radius: 10px;
+      border: 1px solid #3a4d66; background: #0f1419; color: #fff;
+    }
+    .docs { margin-top: 0.75rem; max-height: 280px; overflow-y: auto; }
+    .doc-row {
+      display: grid; grid-template-columns: 1fr auto; gap: 0.5rem;
+      align-items: start; padding: 0.6rem 0; border-bottom: 1px solid #243552;
+    }
+    .doc-row:last-child { border-bottom: none; }
+    .doc-title { font-size: 0.88rem; font-weight: 600; }
+    .doc-link { font-size: 0.78rem; color: #6ecfff; cursor: pointer; margin-top: 0.2rem; display: inline-block; }
+    .doc-check { display: flex; align-items: center; gap: 0.35rem; font-size: 0.82rem; white-space: nowrap; }
+    .doc-check input { width: auto; }
+    #status { margin-top: 0.75rem; font-size: 0.85rem; min-height: 1.2em; }
+    #status.err { color: #ff8a8a; }
+    #status.ok { color: #7dffb0; }
+    .form-gate-msg {
+      display: none; margin: 0.75rem 0; padding: 0.85rem 1rem;
+      border-radius: 12px; background: #14301f; border: 1px solid #2a6b45;
+      color: #b8ffd4; font-size: 0.92rem; line-height: 1.4;
+    }
+    .form-gate-msg.show { display: block; }
+    .enroll-box {
+      margin: 0.75rem 0; padding: 0.85rem; border-radius: 12px;
+      background: #0f1a2a; border: 1px solid #243552; display: none;
+    }
+    .enroll-box.active { display: block; }
+    .enroll-progress {
+      height: 6px; border-radius: 99px; background: #243552; overflow: hidden; margin: 0.55rem 0;
+    }
+    .enroll-progress > span {
+      display: block; height: 100%; width: 0%; background: #2ecc71; transition: width .15s ease;
+    }
+    .enroll-steps { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .enroll-steps span {
+      padding: 0.25rem 0.55rem; border-radius: 999px; font-size: 0.75rem; background: #243552;
+    }
+    .enroll-steps span.ok { background: #1e6b45; }
+    .form-section.disabled {
+      opacity: 0.45; pointer-events: none; filter: grayscale(0.2);
+    }
+    .modal {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      align-items: center; justify-content: center; z-index: 50; padding: 1rem;
+    }
+    .modal.open { display: flex; }
+    .modal-inner {
+      background: #132238; border-radius: 14px; max-width: 560px; width: 100%;
+      max-height: 80vh; overflow: hidden; display: flex; flex-direction: column;
+    }
+    .modal-head { padding: 1rem; border-bottom: 1px solid #243552; display: flex; justify-content: space-between; }
+    .modal-body { padding: 1rem; overflow-y: auto; font-size: 0.85rem; line-height: 1.55; white-space: pre-wrap; }
+    .modal-close { background: none; border: none; color: #fff; font-size: 1.25rem; cursor: pointer; }
+    a { color: #6ecfff; }
+    /* Android WebView / phone */
+    html.cmir-android body,
+    body.cmir-android {
+      padding-bottom: env(safe-area-inset-bottom, 0);
+    }
+    html.cmir-android .wrap,
+    body.cmir-android .wrap {
+      grid-template-columns: 1fr;
+      padding: 0.85rem 0.85rem 1.25rem;
+      gap: 0.85rem;
+    }
+    html.cmir-android .btn-start,
+    html.cmir-android .btn-main,
+    body.cmir-android .btn-start,
+    body.cmir-android .btn-main {
+      max-width: none;
+      min-height: 52px;
+      font-size: 1.08rem;
+    }
+    html.cmir-android .video-stage,
+    body.cmir-android .video-stage {
+      aspect-ratio: 3/4;
+      max-height: 52vh;
+    }
+    html.cmir-android .start-overlay p,
+    body.cmir-android .start-overlay p {
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+  <script>if (/CmirAndroid/i.test(navigator.userAgent)) document.documentElement.classList.add('cmir-android');</script>
+  <div class="wrap">
+    <section class="card">
+      <h1>Камера согласия</h1>
+      <p class="sub">До регистрации лицо на камерах заведения закрыто маской. Сначала снимем профиль лица по ракурсам.</p>
+      <div class="video-stage" id="videoStage">
+        <div class="start-overlay" id="startOverlay">
+          <p>Камера скрыта до начала регистрации. Нажмите кнопку, чтобы пройти съёмку ракурсов лица.</p>
+          <button type="button" class="btn-start" id="btnStartEnroll">Начать регистрацию</button>
+        </div>
+        <div class="video-box privacy-composite" id="videoBox">
+          <video id="live" class="live-source-hidden" autoplay playsinline muted></video>
+          <canvas id="liveMaskCanvas" class="mask-overlay-canvas"></canvas>
+          <div class="countdown-overlay hidden" id="countdownOverlay" aria-hidden="true">3</div>
+          <div class="video-label" id="liveLabel">Подготовка…</div>
+        </div>
+      </div>
+      <div class="enroll-box" id="enrollBox">
+        <p id="enrollTitle" style="font-weight:700;margin-bottom:0.25rem">Съёмка профиля</p>
+        <p id="enrollHint" style="font-size:0.88rem;opacity:0.85">Следуйте подсказкам</p>
+        <div class="enroll-progress"><span id="enrollBar"></span></div>
+        <div class="enroll-steps" id="enrollSteps"></div>
+        <button type="button" class="btn-secondary" id="btnCancelEnroll" style="margin-top:0.75rem">Отмена</button>
+      </div>
+      <p style="margin-top:0.75rem;font-size:0.8rem;opacity:0.7" id="poiName"></p>
+    </section>
+
+    <section class="card" id="panelRegister">
+      <h1>Регистрация</h1>
+      <p class="sub" id="registerSub">Сначала нажмите «Начать регистрацию» и снимите все ракурсы лица. Затем заполните форму и примите соглашения.</p>
+      <div class="form-gate-msg" id="formGateMsg">
+        Ракурсы лица сохранены. Заполните форму ниже и примите соглашения для завершения регистрации.
+      </div>
+
+      <div class="form-section disabled" id="formSection">
+        <label for="fullName">Имя</label>
+        <input id="fullName" placeholder="Иван" autocomplete="given-name" />
+
+        <label for="phone">Телефон</label>
+        <input id="phone" type="tel" placeholder="+995 5XX XX XX XX" autocomplete="tel" />
+
+        <label for="menuItem">Любимый пункт меню заведения</label>
+        <select id="menuItem"><option value="">Загрузка…</option></select>
+
+        <div class="docs" id="docsList"></div>
+
+        <button type="button" class="btn-main" id="btnRegister" disabled>Завершить регистрацию</button>
+      </div>
+      <div id="status"></div>
+      <p id="accountLink" style="margin-top:0.75rem;display:none"><a href="../index.html#account">Личный кабинет →</a></p>
+    </section>
+  </div>
+
+  <div class="modal" id="docModal">
+    <div class="modal-inner">
+      <div class="modal-head">
+        <strong id="modalTitle">Документ</strong>
+        <button type="button" class="modal-close" id="modalClose">×</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <p style="text-align:center;padding:1rem;font-size:0.8rem;opacity:0.6">
+    <a href="../index.html">← На главную</a>
+  </p>
+
+  <script type="module">
+    import { getToken, setToken } from '../js/api.js';
+    import { startMaskedPageCamera } from '../js/live-camera.js?v=camfix9';
+    import { ENROLL_POSES, PoseEnrollment, yawPitchFromBbox, yawPitchFromKeypoints, yawPitchFromMatrix } from '../js/face-enroll.js?v=enroll6';
+
+    const isAndroidApp = /CmirAndroid/i.test(navigator.userAgent || '');
+    if (isAndroidApp) {
+      document.documentElement.classList.add('cmir-android');
+      document.body.classList.add('cmir-android');
+    }
+
+    const API = localStorage.getItem('cmir_api') || (
+      (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+        ? 'http://127.0.0.1:8090'
+        : `http://${location.hostname}:8090`
+    );
+    const qs = new URLSearchParams(location.search);
+    let poiId = qs.get('poi') || localStorage.getItem('cmir_kiosk_poi') || '';
+    let documents = [];
+    const DOC_KEYS = [
+      'terms_of_service',
+      'privacy_policy',
+      'personal_data_consent',
+      'biometric_data_consent',
+      'wallet_agreement',
+    ];
+    const accepted = Object.fromEntries(DOC_KEYS.map((k) => [k, false]));
+    const POSE_LABELS = {
+      center: 'прямо',
+      left: 'влево',
+      right: 'вправо',
+      up: 'вверх',
+      down: 'вниз',
+    };
+
+    const live = document.getElementById('live');
+    const liveLabel = document.getElementById('liveLabel');
+    const btn = document.getElementById('btnRegister');
+    const btnStart = document.getElementById('btnStartEnroll');
+    const btnCancel = document.getElementById('btnCancelEnroll');
+    const statusEl = document.getElementById('status');
+    const startOverlay = document.getElementById('startOverlay');
+    const videoBox = document.getElementById('videoBox');
+    const enrollBox = document.getElementById('enrollBox');
+    const formSection = document.getElementById('formSection');
+    const formGateMsg = document.getElementById('formGateMsg');
+    const countdownOverlay = document.getElementById('countdownOverlay');
+
+    function setCountdownOverlay(n) {
+      if (!countdownOverlay) return;
+      if (n === null || n === undefined) {
+        countdownOverlay.classList.add('hidden');
+        countdownOverlay.classList.remove('snap');
+        countdownOverlay.setAttribute('aria-hidden', 'true');
+        return;
+      }
+      countdownOverlay.textContent = String(n);
+      countdownOverlay.classList.toggle('snap', n === 0);
+      countdownOverlay.classList.remove('hidden');
+      countdownOverlay.setAttribute('aria-hidden', 'false');
+    }
+
+    let hls = null;
+    let liveView = null;
+    let kioskLocked = false;
+    let faceDetector = null;
+    let lastFaceBox = null;
+    let lastPose = { yaw: 0, pitch: 0 };
+    let landmarker = null;
+    let enrollment = null;
+    let capturedTemplates = [];
+    let facesReady = false;
+
+    function getClientId() {
+      let id = sessionStorage.getItem('cmir_kiosk_client');
+      if (!id) {
+        id = globalThis.crypto?.randomUUID?.() || `k-${Date.now()}`;
+        sessionStorage.setItem('cmir_kiosk_client', id);
+      }
+      return id;
+    }
+
+    async function api(method, path, body) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      const token = getToken();
+      if (token) opts.headers.Authorization = 'Bearer ' + token;
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(API + path, opts);
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || res.statusText);
+      return json;
+    }
+
+    function setStatus(msg, ok) {
+      statusEl.textContent = msg || '';
+      statusEl.className = ok ? 'ok' : msg ? 'err' : '';
+    }
+
+    function userHasConsent(u) {
+      return Array.isArray(u?.consents) && u.consents.length > 0;
+    }
+
+    function lockKioskRegistered(name, message) {
+      kioskLocked = true;
+      btn.disabled = true;
+      btn.textContent = 'Вы уже зарегистрированы';
+      btnStart.disabled = true;
+      document.getElementById('panelRegister').classList.add('kiosk-locked');
+      document.getElementById('fullName').disabled = true;
+      document.getElementById('phone').disabled = true;
+      document.getElementById('menuItem').disabled = true;
+      document.querySelectorAll('#docsList input').forEach((cb) => { cb.disabled = true; });
+      document.getElementById('accountLink').style.display = 'block';
+      hideCameraStage();
+      startOverlay.classList.add('hidden');
+      setStatus(message || `${name || 'Пользователь'}: согласие активно.`, true);
+    }
+
+    function hideCameraStage() {
+      videoBox.classList.remove('active');
+      enrollBox.classList.remove('active');
+      startOverlay.classList.remove('hidden');
+      setCountdownOverlay(null);
+      stopLive();
+    }
+
+    function showCameraStage() {
+      startOverlay.classList.add('hidden');
+      videoBox.classList.add('active');
+      enrollBox.classList.add('active');
+    }
+
+    function unlockFormAfterFaces() {
+      facesReady = true;
+      formSection.classList.remove('disabled');
+      formGateMsg.classList.add('show');
+      document.getElementById('registerSub').textContent =
+        'Заполните форму и примите соглашения для завершения регистрации.';
+      updateBtn();
+    }
+
+    function renderEnrollSteps(donePoses = []) {
+      const box = document.getElementById('enrollSteps');
+      box.innerHTML = ENROLL_POSES.map((p) => {
+        const ok = donePoses.includes(p.id);
+        return `<span class="${ok ? 'ok' : ''}">${ok ? '✓ ' : ''}${POSE_LABELS[p.id] || p.id}</span>`;
+      }).join('');
+    }
+
+    function onEnrollStatus(info) {
+      if (typeof info === 'string') {
+        document.getElementById('enrollTitle').textContent = info;
+        liveLabel.textContent = info;
+        setCountdownOverlay(null);
+        return;
+      }
+      if (info.phase === 'countdown' && info.countdown != null) {
+        setCountdownOverlay(info.countdown);
+      } else {
+        setCountdownOverlay(null);
+      }
+      document.getElementById('enrollTitle').textContent =
+        `Шаг ${info.step}/${info.total}: ${info.title}`;
+      document.getElementById('enrollHint').textContent = info.hint || '';
+      document.getElementById('enrollBar').style.width = `${Math.round((info.progress || 0) * 100)}%`;
+      liveLabel.textContent = info.phase === 'countdown'
+        ? `${info.title} — ${info.hint || ''}`
+        : `${info.title} — ${info.hint || ''}`;
+      renderEnrollSteps(capturedTemplates.map((t) => t.pose));
+    }
+
+    async function checkExistingRegistration() {
+      const token = getToken();
+      if (!token) return;
+      try {
+        const me = (await api('GET', '/api/v1/auth/me')).data;
+        if (userHasConsent(me)) {
+          lockKioskRegistered(me.display_name, 'Вы уже вошли в аккаунт с активным согласием.');
+        }
+      } catch (_) {}
+    }
+
+    function updateBtn() {
+      if (kioskLocked) {
+        btn.disabled = true;
+        return;
+      }
+      const formOk = document.getElementById('fullName').value.trim()
+        && document.getElementById('phone').value.trim()
+        && document.getElementById('menuItem').value;
+      const docsOk = DOC_KEYS.every((k) => accepted[k]);
+      btn.disabled = !(facesReady && formOk && docsOk && capturedTemplates.length >= ENROLL_POSES.length);
+    }
+
+    function renderDocs() {
+      const box = document.getElementById('docsList');
+      box.innerHTML = documents.map((d) => `
+        <div class="doc-row" data-type="${d.doc_type}">
+          <div>
+            <div class="doc-title">${d.title}</div>
+            <span class="doc-link" data-open="${d.doc_type}">Прочитать документ</span>
+          </div>
+          <label class="doc-check">
+            <input type="checkbox" data-doc="${d.doc_type}" />
+            Согласен
+          </label>
+        </div>
+      `).join('');
+      box.querySelectorAll('[data-open]').forEach((el) => {
+        el.onclick = () => openDoc(el.dataset.open);
+      });
+      box.querySelectorAll('input[data-doc]').forEach((cb) => {
+        cb.onchange = () => {
+          accepted[cb.dataset.doc] = cb.checked;
+          updateBtn();
+        };
+      });
+    }
+
+    function openDoc(type) {
+      const doc = documents.find((d) => d.doc_type === type);
+      if (!doc) return;
+      document.getElementById('modalTitle').textContent = doc.title;
+      document.getElementById('modalBody').textContent = doc.content;
+      document.getElementById('docModal').classList.add('open');
+    }
+    document.getElementById('modalClose').onclick = () => document.getElementById('docModal').classList.remove('open');
+
+    function pickKioskPoi(list) {
+      if (poiId) {
+        const hit = list.find((p) => p.id === poiId);
+        if (hit) return hit;
+      }
+      const local = list.find((p) =>
+        (p.cameras || []).some((c) => c.is_active && c.source_type === 'local_usb'),
+      );
+      if (local) return local;
+      const saved = localStorage.getItem('cmir_kiosk_poi');
+      if (saved) {
+        const hit = list.find((p) => p.id === saved);
+        if (hit) return hit;
+      }
+      return (
+        list.find((p) => (p.cameras || []).some((c) => c.role === 'consent' && c.is_active))
+        || list[0]
+      );
+    }
+
+    function previewCamera(poi) {
+      const cams = (poi?.cameras || []).filter((c) => c.is_active);
+      return cams.find((c) => c.role === 'consent') || cams.find((c) => c.is_preview) || cams[0] || null;
+    }
+
+    async function resolvePoi() {
+      const res = await fetch(`${API}/api/v1/pois`);
+      const json = await res.json();
+      const list = json.data || [];
+      const poi = pickKioskPoi(list);
+      if (!poi) throw new Error('Нет места (POI). Создайте в админке.');
+      poiId = poi.id;
+      localStorage.setItem('cmir_kiosk_poi', poiId);
+      document.getElementById('poiName').textContent = `Заведение: ${poi.name}`;
+      return poi;
+    }
+
+    async function loadMenu() {
+      const items = (await api('GET', `/api/v1/pois/${poiId}/menu-items`)).data || [];
+      const sel = document.getElementById('menuItem');
+      sel.innerHTML = '<option value="">— выберите —</option>'
+        + items.map((i) => `<option value="${i}">${i}</option>`).join('');
+      sel.onchange = updateBtn;
+    }
+
+    async function loadDocs() {
+      documents = (await api('GET', '/api/v1/legal/documents')).data || [];
+      renderDocs();
+    }
+
+    function stopHls() {
+      if (hls) { hls.destroy(); hls = null; }
+      live.removeAttribute('src');
+    }
+
+    function stopLive() {
+      enrollment?.stop();
+      enrollment = null;
+      if (liveView) {
+        liveView.stop();
+        liveView = null;
+      }
+      const orphan = live.srcObject;
+      if (orphan?.getTracks) orphan.getTracks().forEach((t) => t.stop());
+      live.srcObject = null;
+      stopHls();
+    }
+
+    function releaseStream() {
+      if (!poiId) return;
+      navigator.sendBeacon?.(
+        `${API}/api/v1/pois/${poiId}/stream/release`,
+        new Blob(
+          [JSON.stringify({ client_id: getClientId(), force: false })],
+          { type: 'application/json' },
+        ),
+      );
+    }
+
+    window.addEventListener('pagehide', () => {
+      stopLive();
+      releaseStream();
+    });
+
+    async function startLiveStream() {
+      const poisRes = await fetch(`${API}/api/v1/pois`);
+      const poi = (await poisRes.json()).data?.find((p) => p.id === poiId);
+      const cam = previewCamera(poi);
+      liveLabel.textContent = 'Подключение камеры…';
+      stopLive();
+      try {
+        // Prefer front camera for kiosk enrollment
+        const { LiveCameraView } = await import('../js/live-camera.js?v=camfix9');
+        const canvas = document.getElementById('liveMaskCanvas');
+        liveView = new LiveCameraView(live, canvas);
+        await liveView.start({
+          facingMode: 'user',
+          maskImageUrl: poi?.mask_image_url ? `${API}${poi.mask_image_url}` : '',
+          apiBase: API,
+          cameraId: cam?.id || '',
+          compositeMode: true,
+        });
+        liveLabel.textContent = 'Камера готова — следуйте подсказкам';
+      } catch (e) {
+        // Fallback to configured POI camera path
+        try {
+          const fallbacks = (poi?.cameras || []).filter((c) => c.is_active && c.id !== cam?.id);
+          const { startMaskedPageCamera } = await import('../js/live-camera.js?v=camfix9');
+          const result = await startMaskedPageCamera({
+            video: live,
+            canvas: document.getElementById('liveMaskCanvas'),
+            cam,
+            poi,
+            fallbackCams: fallbacks,
+            apiBase: API,
+            clientId: getClientId(),
+            usbOnly: false,
+            onStatus: (msg) => { if (msg) liveLabel.textContent = msg; },
+          });
+          liveView = result.view;
+          hls = result.hls;
+          liveLabel.textContent = 'Камера готова — следуйте подсказкам';
+        } catch (e2) {
+          throw new Error(e2.message || e.message || 'Камера недоступна');
+        }
+      }
+    }
+
+    async function initLandmarker() {
+      if (isAndroidApp) {
+        // CDN landmarker often fails in Android WebView — keypoints path is enough
+        landmarker = null;
+        return;
+      }
+      try {
+        const localBase = new URL('../vendor/mediapipe/', import.meta.url);
+        const bundle = new URL('vision_bundle.mjs', localBase).href;
+        const wasm = new URL('wasm', localBase).href;
+        const { FaceLandmarker, FilesetResolver } = await import(bundle);
+        const files = await FilesetResolver.forVisionTasks(wasm);
+        // Local bundle may not include landmarker model — try CDN model path as last resort
+        try {
+          landmarker = await FaceLandmarker.createFromOptions(files, {
+            baseOptions: {
+              modelAssetPath:
+                'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+            },
+            runningMode: 'VIDEO',
+            numFaces: 1,
+            outputFacialTransformationMatrixes: true,
+          });
+        } catch (_) {
+          landmarker = null;
+        }
+      } catch (e) {
+        console.warn('FaceLandmarker unavailable, using bbox pose', e);
+        landmarker = null;
+      }
+    }
+
+    function samplePose() {
+      // Prefer keypoints from local BlazeFace (works offline in Android WebView)
+      const kps = liveView?.lastKeypoints;
+      if (kps && live.videoWidth) {
+        const fromKp = yawPitchFromKeypoints(kps, live.videoWidth, live.videoHeight);
+        if (fromKp) {
+          lastPose = fromKp;
+          return lastPose;
+        }
+      }
+      if (!isAndroidApp && landmarker && live.readyState >= 2) {
+        try {
+          const res = landmarker.detectForVideo(live, performance.now());
+          const m = res.facialTransformationMatrixes?.[0]?.data || res.facialTransformationMatrixes?.[0];
+          if (m) {
+            lastPose = yawPitchFromMatrix(m);
+            return lastPose;
+          }
+        } catch (_) {}
+      }
+      const bb = liveView?.lastFaceBbox;
+      if (bb) {
+        lastPose = yawPitchFromBbox(bb, live.videoWidth, live.videoHeight);
+        return lastPose;
+      }
+      return lastPose;
+    }
+
+    function captureEmbedding() {
+      if (liveView?.getLastFaceSignature) {
+        const sig = liveView.getLastFaceSignature();
+        if (sig) return sig;
+      }
+      const w = 32, h = 32;
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = live.videoWidth || 640;
+      canvas.height = live.videoHeight || 480;
+      if (!canvas.width || !canvas.height) return null;
+      ctx.drawImage(live, 0, 0, canvas.width, canvas.height);
+      const side = Math.min(canvas.width, canvas.height) * 0.5;
+      const sx = (canvas.width - side) / 2;
+      const sy = (canvas.height - side) / 2;
+      const out = document.createElement('canvas');
+      out.width = w; out.height = h;
+      out.getContext('2d').drawImage(canvas, sx, sy, side, side, 0, 0, w, h);
+      const img = out.getContext('2d').getImageData(0, 0, w, h);
+      const gray = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        const o = i * 4;
+        gray[i] = (img.data[o] + img.data[o + 1] + img.data[o + 2]) / (3 * 255);
+      }
+      let norm = 0;
+      for (let i = 0; i < gray.length; i++) norm += gray[i] * gray[i];
+      norm = Math.sqrt(norm) || 1;
+      return Array.from(gray, (v) => v / norm);
+    }
+
+    async function runEnrollmentFlow() {
+      if (kioskLocked) return;
+      btnStart.disabled = true;
+      capturedTemplates = [];
+      facesReady = false;
+      formSection.classList.add('disabled');
+      formGateMsg.classList.remove('show');
+      renderEnrollSteps([]);
+      showCameraStage();
+      setStatus('Запуск камеры…');
+      try {
+        await startLiveStream();
+        await initLandmarker();
+        enrollment = new PoseEnrollment({
+          onStatus: onEnrollStatus,
+          onPoseCaptured: (tpl, all) => {
+            capturedTemplates = all;
+            renderEnrollSteps(all.map((t) => t.pose));
+          },
+          captureSignature: () => liveView?.getLastFaceSignature() || captureEmbedding(),
+          getPose: samplePose,
+          holdNeed: isAndroidApp ? 6 : 8,
+          timeoutMs: isAndroidApp ? 6000 : 8000,
+          countdownSec: 3,
+        });
+        const templates = await enrollment.run();
+        if (templates.length < ENROLL_POSES.length) {
+          throw new Error('Не удалось снять все ракурсы — попробуйте снова');
+        }
+        capturedTemplates = templates;
+        hideCameraStage();
+        unlockFormAfterFaces();
+        setStatus('Ракурсы сохранены. Заполните форму и примите соглашения.', true);
+      } catch (e) {
+        setStatus(e.message || 'Ошибка съёмки');
+        hideCameraStage();
+        if (!kioskLocked) btnStart.disabled = false;
+      } finally {
+        enrollment = null;
+      }
+    }
+
+    btnStart.onclick = () => runEnrollmentFlow();
+    btnCancel.onclick = () => {
+      enrollment?.stop();
+      hideCameraStage();
+      if (!kioskLocked && !facesReady) btnStart.disabled = false;
+      setStatus('Съёмка отменена');
+    };
+
+    btn.onclick = async () => {
+      if (kioskLocked || !facesReady) return;
+      btn.disabled = true;
+      setStatus('Сохранение регистрации…');
+      try {
+        const payload = {
+          full_name: document.getElementById('fullName').value.trim(),
+          phone: document.getElementById('phone').value.trim(),
+          favorite_menu_item: document.getElementById('menuItem').value,
+          face_embedding: capturedTemplates[0].embedding,
+          face_embeddings: capturedTemplates,
+          acceptances: Object.fromEntries(DOC_KEYS.map((k) => [k, !!accepted[k]])),
+        };
+        const res = await api('POST', `/api/v1/pois/${poiId}/kiosk-register`, payload);
+        if (res.data?.auth?.token) setToken(res.data.auth.token);
+        if (res.data?.user) localStorage.setItem('cmir_user', JSON.stringify(res.data.user));
+        document.getElementById('accountLink').style.display = 'block';
+        lockKioskRegistered(
+          document.getElementById('fullName').value.trim() || res.data?.user?.display_name,
+          `${res.message || 'Регистрация завершена'}\nКошелёк: ${res.data.wallet?.address || '—'}\nПрофиль лица: ${capturedTemplates.length} ракурсов${
+            res.data?.temporary_password
+              ? `\nВход позже: телефон ${res.data.phone} · пароль ${res.data.temporary_password}`
+              : ''
+          }`,
+        );
+      } catch (e) {
+        setStatus(e.message);
+        if (!kioskLocked) btn.disabled = false;
+      }
+    };
+
+    ['input', 'change'].forEach((ev) => {
+      document.getElementById('fullName').addEventListener(ev, updateBtn);
+      document.getElementById('phone').addEventListener(ev, updateBtn);
+    });
+
+    try {
+      await checkExistingRegistration();
+      await resolvePoi();
+      await Promise.all([loadMenu(), loadDocs()]);
+      updateBtn();
+      renderEnrollSteps([]);
+    } catch (e) {
+      setStatus(e.message);
+    }
+  </script>
+</body>
+</html>

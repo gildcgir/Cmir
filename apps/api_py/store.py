@@ -7,8 +7,9 @@ import secrets
 import sqlite3
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from auth import hash_password, is_blocked, is_session_valid, new_session_token, session_expires, verify_password
@@ -25,7 +26,7 @@ from compliance import (
     require_data_key_in_prod,
     validate_acceptances,
 )
-from database import app_env, connect, masks_dir, row_to_dict
+from database import app_env, connect, db_path, masks_dir, row_to_dict
 from face_profiles import MIN_TEMPLATES, REQUIRED_POSES, normalize_face_templates
 from stream_paths import poi_rtmp_url
 from stream_recorder import RECORDER
@@ -322,6 +323,35 @@ class Store:
     def is_admin(self, user: dict) -> bool:
         return (user.get("role") or "user") == "admin"
 
+    def is_host(self, user: dict) -> bool:
+        return (user.get("role") or "user") in ("host", "admin")
+
+    def is_poi_host(self, user: dict, poi_id: str) -> bool:
+        """Host of a specific place: admin, or submitted_by owner with host/user rights."""
+        if not user:
+            return False
+        if self.is_admin(user):
+            return True
+        row = self.conn.execute(
+            "SELECT submitted_by FROM pois WHERE id = ?",
+            (poi_id,),
+        ).fetchone()
+        if not row or not row["submitted_by"]:
+            return False
+        return row["submitted_by"] == user.get("id")
+
+    def promote_to_host(self, user_id: str) -> None:
+        row = self.conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            return
+        if (row["role"] or "user") == "admin":
+            return
+        self.conn.execute(
+            "UPDATE users SET role = 'host', updated_at = ? WHERE id = ?",
+            (now_iso(), user_id),
+        )
+        self.conn.commit()
+
     # --- Admin: users ---
 
     def list_users(self) -> List[dict]:
@@ -343,8 +373,8 @@ class Store:
         password = body.get("password", "")
         display_name = body.get("display_name", "") or email.split("@")[0]
         role = body.get("role", "user")
-        if role not in ("user", "admin"):
-            raise ValueError("role must be user or admin")
+        if role not in ("user", "host", "admin"):
+            raise ValueError("role must be user, host or admin")
         if email == "admin":
             raise ValueError("reserved email")
         if not email or ("@" not in email and role != "admin"):
@@ -386,8 +416,8 @@ class Store:
             fields.append("password_hash = ?")
             vals.append(hash_password(body["password"]))
         if "role" in body:
-            if body["role"] not in ("user", "admin"):
-                raise ValueError("role must be user or admin")
+            if body["role"] not in ("user", "host", "admin"):
+                raise ValueError("role must be user, host or admin")
             if row["email"] == "admin" and body["role"] != "admin":
                 raise ValueError("cannot demote default admin")
             fields.append("role = ?")
@@ -456,6 +486,14 @@ class Store:
             )},
             "address": p.get("address") or "",
             "comment": p.get("comment") or "",
+            "status": p.get("status") or "published",
+            "submitted_by": p.get("submitted_by"),
+            "facing_mode": p.get("facing_mode") or "user",
+            "linger_until": p.get("linger_until"),
+            "live_ended_at": p.get("live_ended_at"),
+            "replay_clip_url": (
+                f"/api/v1/pois/{poi_id}/replay-clip.mp4" if p.get("replay_clip_path") else None
+            ),
             "mask_image_url": f"/api/v1/pois/{poi_id}/mask-image" if p.get("mask_image") else None,
             "cameras": cams,
             "stats": {
@@ -466,10 +504,34 @@ class Store:
             },
         }
 
-    def list_pois(self) -> List[dict]:
+    def list_pois(self, *, status: Optional[str] = "published", include_all: bool = False) -> List[dict]:
         self._maybe_restore_demo_fixtures()
-        ids = [r["id"] for r in self.conn.execute("SELECT id FROM pois ORDER BY created_at").fetchall()]
-        return [self.poi_payload(pid) for pid in ids]
+        self.cleanup_expired_lingers()
+        if include_all:
+            rows = self.conn.execute("SELECT id FROM pois ORDER BY created_at").fetchall()
+        elif status == "published":
+            # Live venues + post-stream linger (last 5 min replay for 30 min)
+            rows = self.conn.execute(
+                """
+                SELECT id FROM pois
+                WHERE COALESCE(status, 'published') = 'published'
+                   OR (
+                        COALESCE(status, '') = 'lingering'
+                        AND linger_until IS NOT NULL
+                        AND linger_until > ?
+                   )
+                ORDER BY created_at
+                """,
+                (now_iso(),),
+            ).fetchall()
+        elif status:
+            rows = self.conn.execute(
+                "SELECT id FROM pois WHERE COALESCE(status, 'published') = ? ORDER BY created_at",
+                (status,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT id FROM pois ORDER BY created_at").fetchall()
+        return [self.poi_payload(r["id"]) for r in rows]
 
     def _maybe_restore_demo_fixtures(self) -> None:
         """В test-среде восстанавливает демо-места, если карта пуста или нет эталонных POI."""
@@ -489,8 +551,9 @@ class Store:
         self.conn.execute(
             """
             INSERT INTO pois (id, name, description, poi_type, latitude, longitude,
-                promo_description, city, country, address, comment, consent_rate, participants_24h, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                promo_description, city, country, address, comment, consent_rate, participants_24h,
+                status, submitted_by, facing_mode, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
             """,
             (
                 poi_id,
@@ -504,6 +567,9 @@ class Store:
                 body.get("country", ""),
                 body.get("address", ""),
                 body.get("comment", body.get("description", "")),
+                body.get("status", "published"),
+                body.get("submitted_by"),
+                body.get("facing_mode", "user"),
                 t,
                 t,
             ),
@@ -570,8 +636,10 @@ class Store:
             raise KeyError("poi not found")
         fields = []
         vals: list[Any] = []
-        for key in ("name", "description", "promo_description", "city", "country", "address", "comment"):
+        for key in ("name", "description", "promo_description", "city", "country", "address", "comment", "facing_mode"):
             if key in body:
+                if key == "facing_mode" and body[key] not in ("user", "environment"):
+                    raise ValueError("facing_mode must be user or environment")
                 fields.append(f"{key} = ?")
                 vals.append(body[key])
         if "latitude" in body:
@@ -2133,3 +2201,302 @@ class Store:
         self.health_snapshots.setdefault(camera_id, []).append(snap)
         self.health_snapshots[camera_id] = self.health_snapshots[camera_id][-50:]
         return snap
+
+    # --- User POI submissions ---
+
+    def submit_poi(self, user: dict, body: dict) -> dict:
+        name = (body.get("name") or "").strip()
+        if len(name) < 2:
+            raise ValueError("name required")
+        lat = float(body["latitude"])
+        lng = float(body["longitude"])
+        if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+            raise ValueError("invalid coordinates")
+        facing = body.get("facing_mode") or "user"
+        if facing not in ("user", "environment"):
+            facing = "user"
+        poi = self.create_poi({
+            "name": name,
+            "description": body.get("description") or body.get("comment") or "",
+            "comment": body.get("comment") or body.get("description") or "",
+            "address": body.get("address") or "",
+            "city": body.get("city") or "",
+            "country": body.get("country") or "",
+            "latitude": lat,
+            "longitude": lng,
+            "poi_type": "live_cam",
+            "status": "pending",
+            "submitted_by": user["id"],
+            "facing_mode": facing,
+        })
+        # Browser/phone camera as local source until admin wires RTSP
+        self.add_camera(poi.id, {
+            "name": "Камера заявителя",
+            "role": "general",
+            "view_mode": "standard",
+            "is_active": True,
+            "is_preview": True,
+            "source_type": "local_usb",
+            "stream_url": f"local://facing/{facing}",
+            "device_label": "front" if facing == "user" else "back",
+            "slot_index": 0,
+        })
+        return self.poi_payload(poi.id)
+
+    def set_poi_status(self, poi_id: str, status: str) -> dict:
+        if status not in ("published", "pending", "rejected", "lingering"):
+            raise ValueError("invalid status")
+        row = self.conn.execute("SELECT * FROM pois WHERE id = ?", (poi_id,)).fetchone()
+        if not row:
+            raise KeyError("poi not found")
+        self.conn.execute(
+            "UPDATE pois SET status = ?, updated_at = ? WHERE id = ?",
+            (status, now_iso(), poi_id),
+        )
+        self.conn.commit()
+        # Approving a user-submitted place promotes the owner to Host
+        if status == "published" and row["submitted_by"]:
+            self.promote_to_host(row["submitted_by"])
+        return self.poi_payload(poi_id)
+
+    LINGER_SECONDS = 30 * 60
+    REPLAY_SECONDS = 5 * 60
+
+    def get_replay_clip_path(self, poi_id: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT replay_clip_path FROM pois WHERE id = ?",
+            (poi_id,),
+        ).fetchone()
+        return row["replay_clip_path"] if row and row["replay_clip_path"] else None
+
+    def cleanup_expired_lingers(self) -> int:
+        """Remove user places whose 30-minute post-stream linger expired."""
+        t = now_iso()
+        rows = self.conn.execute(
+            """
+            SELECT id, replay_clip_path FROM pois
+            WHERE COALESCE(status, '') = 'lingering'
+              AND linger_until IS NOT NULL
+              AND linger_until <= ?
+            """,
+            (t,),
+        ).fetchall()
+        removed = 0
+        for r in rows:
+            path = r["replay_clip_path"]
+            if path:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                    # also drop sibling raw if present
+                    p = Path(path)
+                    for sib in p.parent.glob("*"):
+                        try:
+                            sib.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    try:
+                        p.parent.rmdir()
+                    except OSError:
+                        pass
+                except OSError:
+                    pass
+            try:
+                self.delete_poi(r["id"])
+                removed += 1
+            except Exception:
+                pass
+        return removed
+
+    def end_user_broadcast(
+        self,
+        user: dict,
+        poi_id: str,
+        *,
+        uploaded_clip: Optional[Path] = None,
+        linger_seconds: Optional[int] = None,
+        replay_seconds: Optional[int] = None,
+    ) -> dict:
+        """
+        Host finishes a user-submitted place stream:
+        keep the map pin for ~30 min with a ~5 min replay clip, then auto-delete.
+        """
+        row = self.conn.execute("SELECT * FROM pois WHERE id = ?", (poi_id,)).fetchone()
+        if not row:
+            raise KeyError("poi not found")
+        p = row_to_dict(row)
+        if not p.get("submitted_by"):
+            raise ValueError("only user-submitted places support post-stream linger")
+        if p["submitted_by"] != user["id"] and not self.is_admin(user):
+            raise PermissionError("only the place owner (or admin) can end the broadcast")
+        if (p.get("status") or "") in ("pending", "rejected"):
+            raise ValueError("place is not live yet")
+
+        linger_s = int(linger_seconds if linger_seconds is not None else self.LINGER_SECONDS)
+        replay_s = int(replay_seconds if replay_seconds is not None else self.REPLAY_SECONDS)
+        t = now_iso()
+        linger_until = (datetime.now(timezone.utc) + timedelta(seconds=linger_s)).isoformat().replace("+00:00", "Z")
+
+        clip_dest: Optional[str] = None
+        out_dir = db_path().parent / "linger" / poi_id.replace("-", "")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dest = out_dir / "replay_5m.mp4"
+
+        if uploaded_clip and Path(uploaded_clip).is_file() and Path(uploaded_clip).stat().st_size > 0:
+            import shutil
+
+            shutil.copy2(uploaded_clip, dest)
+            clip_dest = str(dest)
+        else:
+            # Try latest stream_recording for this POI / user
+            rec = self.conn.execute(
+                """
+                SELECT id, raw_path, clip_path FROM stream_recordings
+                WHERE poi_id = ? AND user_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (poi_id, user["id"]),
+            ).fetchone()
+            if not rec and self.is_admin(user):
+                rec = self.conn.execute(
+                    """
+                    SELECT id, raw_path, clip_path FROM stream_recordings
+                    WHERE poi_id = ?
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (poi_id,),
+                ).fetchone()
+            raw = None
+            if rec and rec["raw_path"] and Path(rec["raw_path"]).is_file():
+                raw = Path(rec["raw_path"])
+            elif rec and rec["clip_path"] and Path(rec["clip_path"]).is_file():
+                raw = Path(rec["clip_path"])
+            if raw:
+                rid = rec["id"] if rec else str(uuid.uuid4())
+                tail = RECORDER.process_tail_clip(rid, raw, seconds=replay_s)
+                if tail and tail.is_file():
+                    import shutil
+
+                    shutil.copy2(tail, dest)
+                    clip_dest = str(dest)
+            if not clip_dest:
+                # Fall back to 10s preview buffer if present
+                from preview_buffer import clip_path as preview_clip_path
+
+                prev = preview_clip_path(poi_id)
+                if prev.is_file() and prev.stat().st_size > 0:
+                    import shutil
+
+                    shutil.copy2(prev, dest)
+                    clip_dest = str(dest)
+
+        self.conn.execute(
+            """
+            UPDATE pois SET status = 'lingering', live_ended_at = ?, linger_until = ?,
+                replay_clip_path = ?, updated_at = ? WHERE id = ?
+            """,
+            (t, linger_until, clip_dest, t, poi_id),
+        )
+        self.conn.commit()
+        return self.poi_payload(poi_id)
+
+    # --- POI chat ---
+
+    def list_chat(self, poi_id: str, *, since: Optional[str] = None, limit: int = 100) -> List[dict]:
+        if not self.conn.execute("SELECT 1 FROM pois WHERE id = ?", (poi_id,)).fetchone():
+            raise KeyError("poi not found")
+        limit = max(1, min(200, int(limit)))
+        if since:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM poi_chat_messages
+                WHERE poi_id = ? AND deleted_at IS NULL AND created_at > ?
+                ORDER BY created_at ASC LIMIT ?
+                """,
+                (poi_id, since, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM poi_chat_messages
+                WHERE poi_id = ? AND deleted_at IS NULL
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (poi_id, limit),
+            ).fetchall()
+            rows = list(reversed(rows))
+        return [row_to_dict(r) for r in rows]
+
+    def is_chat_muted(self, poi_id: str, user_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT muted_until FROM poi_chat_mutes WHERE poi_id = ? AND user_id = ?",
+            (poi_id, user_id),
+        ).fetchone()
+        if not row:
+            return False
+        until = row["muted_until"]
+        if not until:
+            return True  # permanent
+        return is_blocked(until)
+
+    def post_chat(self, poi_id: str, user: dict, body_text: str) -> dict:
+        if not self.conn.execute("SELECT 1 FROM pois WHERE id = ?", (poi_id,)).fetchone():
+            raise KeyError("poi not found")
+        text = (body_text or "").strip()
+        if not text or len(text) > 1000:
+            raise ValueError("message must be 1..1000 chars")
+        if self.is_chat_muted(poi_id, user["id"]):
+            raise PermissionError("chat muted")
+        mid = str(uuid.uuid4())
+        t = now_iso()
+        self.conn.execute(
+            """
+            INSERT INTO poi_chat_messages (id, poi_id, user_id, display_name, body, created_at, deleted_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (mid, poi_id, user["id"], user.get("display_name") or user.get("email") or "user", text, t),
+        )
+        self.conn.commit()
+        row = self.conn.execute("SELECT * FROM poi_chat_messages WHERE id = ?", (mid,)).fetchone()
+        return row_to_dict(row)
+
+    def delete_chat_message(self, poi_id: str, message_id: str) -> None:
+        row = self.conn.execute(
+            "SELECT 1 FROM poi_chat_messages WHERE id = ? AND poi_id = ?",
+            (message_id, poi_id),
+        ).fetchone()
+        if not row:
+            raise KeyError("message not found")
+        self.conn.execute(
+            "UPDATE poi_chat_messages SET deleted_at = ? WHERE id = ?",
+            (now_iso(), message_id),
+        )
+        self.conn.commit()
+
+    def mute_chat_user(self, poi_id: str, user_id: str, actor_id: str, hours: Optional[float] = None, reason: str = "") -> dict:
+        if not self.conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone():
+            raise KeyError("user not found")
+        until = None
+        if hours is not None and float(hours) > 0:
+            until = (datetime.now(timezone.utc) + timedelta(hours=float(hours))).isoformat()
+        t = now_iso()
+        self.conn.execute(
+            """
+            INSERT INTO poi_chat_mutes (poi_id, user_id, muted_until, muted_by, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(poi_id, user_id) DO UPDATE SET
+              muted_until = excluded.muted_until,
+              muted_by = excluded.muted_by,
+              reason = excluded.reason,
+              created_at = excluded.created_at
+            """,
+            (poi_id, user_id, until, actor_id, reason or "", t),
+        )
+        self.conn.commit()
+        return {"poi_id": poi_id, "user_id": user_id, "muted_until": until, "reason": reason or ""}
+
+    def unmute_chat_user(self, poi_id: str, user_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM poi_chat_mutes WHERE poi_id = ? AND user_id = ?",
+            (poi_id, user_id),
+        )
+        self.conn.commit()

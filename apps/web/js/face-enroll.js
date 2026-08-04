@@ -1,13 +1,44 @@
 /**
  * Guided multi-pose face enrollment for Cmir consent kiosk.
- * Poses: center → left → right → up → down (MediaPipe Face Landmarker yaw/pitch).
+ * Poses: center → left → right → up → down.
+ * Each pose: instruction → countdown 3,2,1,0 → capture.
  */
 export const ENROLL_POSES = [
-  { id: "center", title: "Смотрите прямо в камеру", yaw: [ -12, 12], pitch: [-12, 12] },
-  { id: "left", title: "Поверните голову влево", yaw: [ 18, 55], pitch: [-18, 18] },
-  { id: "right", title: "Поверните голову вправо", yaw: [-55,-18], pitch: [-18, 18] },
-  { id: "up", title: "Поднимите подбородок вверх", yaw: [-18, 18], pitch: [-45,-14] },
-  { id: "down", title: "Опустите подбородок вниз", yaw: [-18, 18], pitch: [ 14, 45] },
+  {
+    id: "center",
+    title: "Смотрите прямо в камеру",
+    hint: "Держите голову ровно, лицо полностью в кадре",
+    yaw: [-12, 12],
+    pitch: [-12, 12],
+  },
+  {
+    id: "left",
+    title: "Поверните голову влево",
+    hint: "Медленно поверните лицо к левому плечу и задержите",
+    yaw: [18, 55],
+    pitch: [-18, 18],
+  },
+  {
+    id: "right",
+    title: "Поверните голову вправо",
+    hint: "Медленно поверните лицо к правому плечу и задержите",
+    yaw: [-55, -18],
+    pitch: [-18, 18],
+  },
+  {
+    id: "up",
+    title: "Поднимите подбородок вверх",
+    hint: "Слегка запрокиньте голову, смотря чуть выше камеры",
+    yaw: [-18, 18],
+    pitch: [-45, -14],
+  },
+  {
+    id: "down",
+    title: "Опустите подбородок вниз",
+    hint: "Наклоните голову вниз, взгляд чуть ниже камеры",
+    yaw: [-18, 18],
+    pitch: [14, 45],
+  },
 ];
 
 export function poseInRange(yaw, pitch, step) {
@@ -19,7 +50,6 @@ export function poseInRange(yaw, pitch, step) {
 /** Approximate yaw/pitch (degrees) from Face Landmarker facialTransformationMatrix. */
 export function yawPitchFromMatrix(matrixData) {
   if (!matrixData || matrixData.length < 16) return { yaw: 0, pitch: 0, roll: 0 };
-  // column-major 4x4
   const r00 = matrixData[0];
   const r10 = matrixData[1];
   const r20 = matrixData[2];
@@ -42,11 +72,46 @@ export function yawPitchFromBbox(bbox, videoW, videoH) {
   return { yaw, pitch };
 }
 
+/** Yaw/pitch from BlazeFace keypoints (eyes/nose) — works offline in Android WebView. */
+export function yawPitchFromKeypoints(kps, videoW, videoH) {
+  if (!kps || kps.length < 3 || !videoW || !videoH) return null;
+  const pt = (i) => {
+    const p = kps[i];
+    if (!p) return null;
+    return {
+      x: p.x <= 1 ? p.x * videoW : p.x,
+      y: p.y <= 1 ? p.y * videoH : p.y,
+    };
+  };
+  const right = pt(0);
+  const left = pt(1);
+  const nose = pt(2);
+  if (!right || !left || !nose) return null;
+  const midX = (left.x + right.x) / 2;
+  const midY = (left.y + right.y) / 2;
+  const eyeDist = Math.hypot(left.x - right.x, left.y - right.y) || 1;
+  const yaw = ((nose.x - midX) / eyeDist) * 45;
+  const pitch = ((nose.y - midY) / eyeDist) * 40;
+  return { yaw, pitch };
+}
+
 export class PoseEnrollment {
-  constructor({ onStatus, captureSignature, getPose }) {
+  constructor({
+    onStatus,
+    onPoseCaptured,
+    captureSignature,
+    getPose,
+    holdNeed = 8,
+    timeoutMs = 8000,
+    countdownSec = 3,
+  } = {}) {
     this.onStatus = onStatus || (() => {});
+    this.onPoseCaptured = onPoseCaptured || (() => {});
     this.captureSignature = captureSignature;
     this.getPose = getPose;
+    this.holdNeed = holdNeed;
+    this.timeoutMs = timeoutMs;
+    this.countdownSec = Math.max(0, Number(countdownSec) || 0);
     this.templates = [];
     this.stepIndex = 0;
     this.stableFrames = 0;
@@ -73,32 +138,74 @@ export class PoseEnrollment {
     this.running = true;
     while (this.running && this.stepIndex < ENROLL_POSES.length) {
       const step = this.current;
-      this.onStatus(`Шаг ${this.stepIndex + 1}/${ENROLL_POSES.length}: ${step.title}`);
+      this.onStatus({
+        step: this.stepIndex + 1,
+        total: ENROLL_POSES.length,
+        poseId: step.id,
+        title: step.title,
+        hint: step.hint,
+        progress: 0,
+        phase: "guide",
+        countdown: null,
+      });
+      await sleep(600);
+      if (!this.running) break;
+
+      await this._countdown(step);
+      if (!this.running) break;
+
+      // Short hold after 0 — then capture (countdown already prepared the user)
       this.stableFrames = 0;
-      // wait until pose held ~0.7s
-      // eslint-disable-next-line no-await-in-loop
       await this._waitPose(step);
       if (!this.running) break;
+
       const sig = this.captureSignature();
       if (!sig) {
-        this.onStatus("Лицо не видно — повторите позу");
-        // eslint-disable-next-line no-await-in-loop
-        await sleep(600);
+        this.onStatus({
+          step: this.stepIndex + 1,
+          total: ENROLL_POSES.length,
+          poseId: step.id,
+          title: step.title,
+          hint: "Лицо не видно — вернитесь в кадр, повторим отсчёт",
+          progress: 0,
+          phase: "retry",
+          countdown: null,
+        });
+        await sleep(900);
         continue;
       }
       const pose = this.getPose() || { yaw: 0, pitch: 0 };
-      this.templates.push({
+      const tpl = {
         pose: step.id,
         embedding: sig,
         yaw: pose.yaw,
         pitch: pose.pitch,
-      });
+      };
+      this.templates.push(tpl);
+      this.onPoseCaptured(tpl, [...this.templates]);
       this.stepIndex += 1;
-      this.onStatus(`✓ ${step.title}`);
-      // eslint-disable-next-line no-await-in-loop
-      await sleep(350);
+      this.onStatus({
+        step: this.stepIndex,
+        total: ENROLL_POSES.length,
+        poseId: step.id,
+        title: `✓ ${step.title}`,
+        hint: this.stepIndex < ENROLL_POSES.length ? "Отлично, следующий ракурс…" : "Все ракурсы сохранены",
+        progress: 1,
+        phase: "captured",
+        countdown: null,
+      });
+      await sleep(500);
     }
     this.running = false;
+    this.onStatus({
+      step: this.templates.length,
+      total: ENROLL_POSES.length,
+      phase: "done",
+      countdown: null,
+      title: "Готово",
+      hint: "",
+      progress: 1,
+    });
     return this.templates;
   }
 
@@ -106,25 +213,56 @@ export class PoseEnrollment {
     this.running = false;
   }
 
+  async _countdown(step) {
+    const from = this.countdownSec;
+    for (let n = from; n >= 0; n--) {
+      if (!this.running) return;
+      this.onStatus({
+        step: this.stepIndex + 1,
+        total: ENROLL_POSES.length,
+        poseId: step.id,
+        title: step.title,
+        hint: n === 0 ? "Фиксация ракурса!" : `Примите позу — съёмка через ${n}…`,
+        progress: from <= 0 ? 1 : (from - n) / from,
+        phase: "countdown",
+        countdown: n,
+      });
+      await sleep(1000);
+    }
+  }
+
   async _waitPose(step) {
-    const need = 8;
+    const need = this.holdNeed;
     const started = Date.now();
-    const timeoutMs = 9000;
+    const timeoutMs = this.timeoutMs;
     while (this.running && this.stableFrames < need) {
       const pose = this.getPose();
       const timedOut = Date.now() - started > timeoutMs;
       if ((pose && poseInRange(pose.yaw, pose.pitch, step)) || timedOut) {
         this.stableFrames += 1;
-        this.onStatus(
-          timedOut
-            ? `Шаг ${this.stepIndex + 1}/${ENROLL_POSES.length}: держите лицо в кадре… ${this.stableFrames}/${need}`
-            : `Шаг ${this.stepIndex + 1}/${ENROLL_POSES.length}: ${step.title}… ${this.stableFrames}/${need}`,
-        );
+        this.onStatus({
+          step: this.stepIndex + 1,
+          total: ENROLL_POSES.length,
+          poseId: step.id,
+          title: timedOut ? "Держите лицо в кадре" : step.title,
+          hint: timedOut ? "Фиксация…" : "Отлично, держите…",
+          progress: this.stableFrames / need,
+          phase: "hold",
+          countdown: null,
+        });
       } else {
         this.stableFrames = Math.max(0, this.stableFrames - 2);
-        this.onStatus(`Шаг ${this.stepIndex + 1}/${ENROLL_POSES.length}: ${step.title}`);
+        this.onStatus({
+          step: this.stepIndex + 1,
+          total: ENROLL_POSES.length,
+          poseId: step.id,
+          title: step.title,
+          hint: step.hint,
+          progress: this.stableFrames / need,
+          phase: "guide",
+          countdown: null,
+        });
       }
-      // eslint-disable-next-line no-await-in-loop
       await sleep(70);
     }
   }

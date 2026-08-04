@@ -11,7 +11,7 @@ POI_ID="${CMIR_POI_ID:-}"
 cd "$ROOT/apps/face-worker"
 source .venv/bin/activate
 
-ARGS=(--input "$INPUT" --output "$OUT" --max-frames "$MAX_FRAMES")
+ARGS=(--input "$INPUT" --output "$OUT" --max-frames "$MAX_FRAMES" --detector auto --tile --bbox-pad 0.2 --mask eye-rect)
 if [[ "$*" == *"--with-consent"* ]] && [[ -n "$POI_ID" ]]; then
   ARGS+=(--api-url "$API" --poi-id "$POI_ID" --consent-threshold 0.92)
 elif [[ -n "$POI_ID" ]]; then

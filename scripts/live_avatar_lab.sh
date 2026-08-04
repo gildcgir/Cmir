@@ -51,8 +51,12 @@ source .venv/bin/activate
 python -m cmir_face.worker \
   --input "$RTSP_IN" \
   --output "$RTMP_OUT" \
+  --detector auto \
+  --tile \
+  --tile-grid 2x2 \
+  --bbox-pad 0.2 \
   --mask eye-rect \
-  --track-smooth 0.55 \
+  --track-smooth 0.45 \
   > /tmp/cmir_avatar_worker.log 2>&1 &
 WORKER_PID=$!
 echo "  worker PID=$WORKER_PID (лог: /tmp/cmir_avatar_worker.log)"

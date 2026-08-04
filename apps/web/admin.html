@@ -19,6 +19,7 @@
   <div class="admin-tabs">
     <button type="button" class="tab-btn active" data-admin-tab="places">Места</button>
     <button type="button" class="tab-btn" data-admin-tab="users">Пользователи</button>
+    <button type="button" class="tab-btn" data-admin-tab="submissions">Заявки</button>
     <button type="button" class="tab-btn" data-admin-tab="quality">Качество сети</button>
     <button type="button" class="tab-btn" data-admin-tab="stats">Статистика</button>
   </div>
@@ -85,13 +86,13 @@
         <input id="newUserEmail" placeholder="Email нового" />
         <input id="newUserName" placeholder="Имя" />
         <input id="newUserPass" type="password" placeholder="Пароль (8+)" />
-        <select id="newUserRole"><option value="user">user</option><option value="admin">admin</option></select>
+        <select id="newUserRole"><option value="user">user</option><option value="host">host</option><option value="admin">admin</option></select>
         <button type="button" class="secondary" id="btnAddUser" style="width:100%">Добавить</button>
         <hr style="border-color:#2a3548;margin:0.75rem 0" />
         <input id="editUserEmail" placeholder="Email" />
         <input id="editUserName" placeholder="Имя" />
         <input id="editUserPass" type="password" placeholder="Новый пароль" />
-        <select id="editUserRole"><option value="user">user</option><option value="admin">admin</option></select>
+        <select id="editUserRole"><option value="user">user</option><option value="host">host</option><option value="admin">admin</option></select>
         <input id="blockHours" type="number" value="24" />
         <div class="row-btns">
           <button type="button" class="secondary" id="btnSaveUser">Сохранить</button>
@@ -99,6 +100,16 @@
           <button type="button" class="secondary" id="btnUnblockUser">Разблок.</button>
           <button type="button" class="secondary" id="btnDeleteUser" style="color:#ff8a80">Удалить</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="panelSubmissions" class="admin-tab-panel admin-tab-panel--scroll">
+    <div style="max-width:960px;margin:1rem auto;padding:0 1rem">
+      <div class="admin-section">
+        <h3>Заявки пользователей на новые места</h3>
+        <button type="button" class="primary" id="btnRefreshSubmissions">Обновить</button>
+        <div id="submissionsList"></div>
       </div>
     </div>
   </div>

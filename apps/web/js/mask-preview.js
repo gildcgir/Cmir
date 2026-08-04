@@ -1,9 +1,9 @@
-/** Превью маски: поворот по голове, плашка 2× шире, картинка — на всю голову */
+/** Превью маски: плашка/картинка на область глаз (не на всё лицо) */
 
 const BAR_WIDTH_FACTOR = 1.28 * 2;
-const POS_SMOOTH = 0.28;
-const SIZE_SMOOTH = 0.22;
-const ANGLE_SMOOTH = 0.35;
+const POS_SMOOTH = 0.48;
+const SIZE_SMOOTH = 0.4;
+const ANGLE_SMOOTH = 0.45;
 
 function kpCoord(v, dim) {
   return v <= 1 ? v * dim : v;
@@ -64,13 +64,15 @@ export function smoothPose(oldP, newP) {
 
 export function poseFromDetection(kps, vw, vh, bbox, coverHead) {
   if (!kps || kps.length < 2) {
+    // Without eye keypoints we refuse to place an eye-bar (avoids chest FPs)
+    if (!coverHead) return null;
     const box = bboxPixels(bbox, vw, vh);
     if (!box) return null;
     const cx = box.x + box.w / 2;
     const cy = box.y + box.h * 0.42;
-    const w = coverHead ? box.w * 1.35 : box.w * 1.1;
-    const h = coverHead ? box.h * 1.4 : box.h * 0.45;
-    return { cx, cy, w, h, roll: 0, pitch: 0, yaw: 0, mode: coverHead ? "head" : "bar" };
+    const w = box.w * 1.35;
+    const h = box.h * 1.4;
+    return { cx, cy, w, h, roll: 0, pitch: 0, yaw: 0, mode: "head" };
   }
 
   const rx = kpCoord(kps[0].x, vw);
@@ -86,7 +88,7 @@ export function poseFromDetection(kps, vw, vh, bbox, coverHead) {
   const lex = kps[5] ? kpCoord(kps[5].x, vw) : lx + 30;
   const ley = kps[5] ? kpCoord(kps[5].y, vh) : ly;
 
-  const eyeDist = Math.max(12, Math.hypot(lx - rx, ly - ry));
+  const eyeDist = Math.max(3, Math.hypot(lx - rx, ly - ry));
   const cx = (rx + lx) / 2;
   const cy = (ry + ly) / 2;
 
@@ -137,11 +139,12 @@ export function poseFromDetection(kps, vw, vh, bbox, coverHead) {
     };
   }
 
-  const barW = Math.max(72, eyeDist * BAR_WIDTH_FACTOR);
-  const barH = Math.max(22, barW * 0.52);
+  const barW = Math.max(64, eyeDist * BAR_WIDTH_FACTOR * 1.08);
+  // Narrow strip over the eyes — slight padding so eyes never peek out
+  const barH = Math.max(18, Math.min(eyeDist * 1.05, barW * 0.38));
   return {
     cx,
-    cy: cy - barH * 0.08,
+    cy: cy - barH * 0.02,
     w: barW,
     h: barH,
     roll,
@@ -182,7 +185,7 @@ export function drawDefaultPrivacyBar(ctx, pose, scale, ox, oy) {
 }
 
 export function drawOrientedOverlay(ctx, pose, maskImg, scale, ox, oy) {
-  if (!maskImg || pose.mode === "bar") {
+  if (!maskImg) {
     drawDefaultPrivacyBar(ctx, pose, scale, ox, oy);
     return;
   }
@@ -192,10 +195,13 @@ export function drawOrientedOverlay(ctx, pose, maskImg, scale, ox, oy) {
   const w = pose.w * scale;
   const h = pose.h * scale;
 
-  const skewX = Math.tan(pose.yaw) * 0.42;
-  const skewY = Math.tan(pose.pitch) * 0.38;
-  const scaleX = 1 + Math.sin(pose.yaw) * 0.22;
-  const scaleY = 1 + Math.sin(pose.pitch) * 0.18;
+  // Milder warp for eye-bar so the mask stays on the eyes
+  const yawAmp = pose.mode === "bar" ? 0.18 : 0.42;
+  const pitchAmp = pose.mode === "bar" ? 0.14 : 0.38;
+  const skewX = Math.tan(pose.yaw) * yawAmp;
+  const skewY = Math.tan(pose.pitch) * pitchAmp;
+  const scaleX = 1 + Math.sin(pose.yaw) * (pose.mode === "bar" ? 0.1 : 0.22);
+  const scaleY = 1 + Math.sin(pose.pitch) * (pose.mode === "bar" ? 0.08 : 0.18);
 
   ctx.save();
   ctx.globalAlpha = 1;
@@ -306,7 +312,7 @@ export class AdminMaskPreview {
       const dets = this.detector.detectForVideo(video, performance.now()).detections;
       if (dets.length) {
         const d = dets[0];
-        const raw = poseFromDetection(d.keypoints, vw, vh, d.boundingBox, !!this.maskImg);
+        const raw = poseFromDetection(d.keypoints, vw, vh, d.boundingBox, false);
         if (raw) this.smooth = smoothPose(this.smooth, raw);
       }
     }

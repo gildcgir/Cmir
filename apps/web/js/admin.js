@@ -46,7 +46,13 @@ async function guardAdmin() {
 }
 
 function showAdminTab(name) {
-  const panels = { places: "panelPlaces", users: "panelUsers", quality: "panelQuality", stats: "panelStats" };
+  const panels = {
+    places: "panelPlaces",
+    users: "panelUsers",
+    quality: "panelQuality",
+    stats: "panelStats",
+    submissions: "panelSubmissions",
+  };
   document.querySelectorAll("[data-admin-tab]").forEach((b) => {
     b.classList.toggle("active", b.dataset.adminTab === name);
   });
@@ -57,6 +63,7 @@ function showAdminTab(name) {
     setTimeout(() => map.invalidateSize(), 300);
   }
   if (name === "stats") loadAdminStats().catch((e) => alert(e.message));
+  if (name === "submissions") loadSubmissions().catch((e) => alert(e.message));
 }
 
 function requireSelectedPoi(actionLabel) {
@@ -185,9 +192,13 @@ async function loadLocalDevices() {
 
 function stopCameraStreams() {
   maskPreview?.stop();
+  maskPreview = null;
   if (adminHls) { adminHls.destroy(); adminHls = null; }
   if (localPreviewStream) { localPreviewStream.getTracks().forEach((t) => t.stop()); localPreviewStream = null; }
   const video = document.getElementById("adminCameraPreview");
+  if (!video) return;
+  const orphan = video.srcObject;
+  if (orphan?.getTracks) orphan.getTracks().forEach((t) => t.stop());
   video.removeAttribute("src");
   video.srcObject = null;
 }
@@ -512,6 +523,43 @@ async function selectPoi(id) {
   await refreshLocalPreview();
 }
 
+async function loadSubmissions() {
+  const box = document.getElementById("submissionsList");
+  if (!box) return;
+  const res = await api("GET", "/api/v1/pois?status=pending");
+  const rows = res.data || [];
+  if (!rows.length) {
+    box.innerHTML = "<p class='hint'>Нет заявок на модерацию</p>";
+    return;
+  }
+  box.innerHTML = rows.map((p) => `
+    <div class="stream-item" style="padding:0.75rem 0;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;justify-content:space-between">
+      <div>
+        <strong>${p.name}</strong>
+        <p class="hint" style="margin:0.2rem 0 0">${p.address || "—"} · ${Number(p.latitude).toFixed(4)}, ${Number(p.longitude).toFixed(4)} · камера: ${p.facing_mode || "user"}</p>
+        <p class="hint" style="margin:0">${p.comment || p.description || ""}</p>
+      </div>
+      <div style="display:flex;gap:0.35rem">
+        <button type="button" class="primary" data-approve="${p.id}">Одобрить</button>
+        <button type="button" class="secondary" data-reject="${p.id}">Отклонить</button>
+      </div>
+    </div>
+  `).join("");
+  box.querySelectorAll("[data-approve]").forEach((btn) => {
+    btn.onclick = async () => {
+      await api("POST", `/api/v1/pois/${btn.dataset.approve}/approve`, {});
+      await loadSubmissions();
+      try { await loadPois(); } catch (_) {}
+    };
+  });
+  box.querySelectorAll("[data-reject]").forEach((btn) => {
+    btn.onclick = async () => {
+      await api("POST", `/api/v1/pois/${btn.dataset.reject}/reject`, {});
+      await loadSubmissions();
+    };
+  });
+}
+
 async function loadUsers() {
   const res = await api("GET", "/api/v1/admin/users");
   const tbody = document.getElementById("usersBody");
@@ -732,6 +780,7 @@ function bindEvents() {
   });
   bindClick("btnCheckQuality", checkNetworkQuality);
   bindClick("btnRefreshStats", () => loadAdminStats().catch((e) => alert(e.message)));
+  bindClick("btnRefreshSubmissions", () => loadSubmissions().catch((e) => alert(e.message)));
   bindClick("btnAddUser", async () => {
     try {
       await api("POST", "/api/v1/admin/users", {

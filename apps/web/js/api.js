@@ -1,4 +1,30 @@
-export const API = localStorage.getItem("cmir_api") || "http://localhost:8090";
+function defaultApiBase() {
+  const host = typeof location !== "undefined" ? location.hostname : "";
+  // Prefer 127.0.0.1 with adb reverse — "localhost" can resolve oddly on some devices.
+  if (!host || host === "localhost" || host === "127.0.0.1") {
+    return "http://127.0.0.1:8090";
+  }
+  return `http://${host}:8090`;
+}
+
+function resolveApiBase() {
+  const host = typeof location !== "undefined" ? location.hostname : "";
+  const onLoopback = !host || host === "localhost" || host === "127.0.0.1";
+  const stored = localStorage.getItem("cmir_api");
+  // On phone lab via adb reverse, ignore stale overrides that break fetch
+  if (onLoopback) {
+    if (stored && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/i.test(stored.replace(/\/$/, ""))) {
+      localStorage.removeItem("cmir_api");
+    } else if (stored) {
+      return stored.replace(/\/$/, "");
+    }
+    return defaultApiBase();
+  }
+  return (stored || defaultApiBase()).replace(/\/$/, "");
+}
+
+export const API = resolveApiBase();
+
 
 export function getToken() {
   return localStorage.getItem("cmir_token") || "";

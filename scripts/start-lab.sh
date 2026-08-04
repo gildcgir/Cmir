@@ -43,17 +43,19 @@ echo "==> Demo POI (test DB)"
 CMIR_ENV="${CMIR_ENV:-test}" python3 "$ROOT/scripts/seed_test_poi.py" || echo "WARN: seed_test_poi failed"
 
 echo "==> Web :3000"
-ln -sfn "$ROOT/apps/consent-kiosk" "$ROOT/apps/web/kiosk" 2>/dev/null || true
+ln -sfn "$ROOT/apps/web/kiosk" "$ROOT/apps/consent-kiosk" 2>/dev/null || true
 if pgrep -f "http.server 3000" >/dev/null 2>&1; then
-  echo "    (already running)"
-else
-  (
-    cd "$ROOT/apps/web"
-    nohup python3 -m http.server 3000 --bind 127.0.0.1 >"$PID_DIR/web.log" 2>&1 &
-    echo $! >"$PID_DIR/web.pid"
-  )
-  disown || true
+  echo "    (restarting web)"
+  pkill -f "http.server 3000" || true
+  sleep 0.5
 fi
+# 0.0.0.0 — чтобы Pixel в той же Wi‑Fi сети мог открыть http://<mac-lan-ip>:3000/
+(
+  cd "$ROOT/apps/web"
+  nohup python3 -m http.server 3000 --bind 0.0.0.0 >"$PID_DIR/web.log" 2>&1 &
+  echo $! >"$PID_DIR/web.pid"
+)
+disown || true
 
 echo "==> Health poll (background)"
 if [[ -f "$PID_DIR/health.pid" ]] && kill -0 "$(cat "$PID_DIR/health.pid")" 2>/dev/null; then

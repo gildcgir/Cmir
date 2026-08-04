@@ -43,9 +43,74 @@ _MTX_JAR = http.cookiejar.CookieJar()
 _MTX_OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_MTX_JAR))
 
 
+_TILE_CACHE: dict[str, tuple[float, bytes, str]] = {}
+_TILE_CACHE_MAX = 512
+_TILE_TTL = 3600.0
+
+
 def public_base_url(handler: BaseHTTPRequestHandler) -> str:
     host = handler.headers.get("Host") or f"localhost:{PORT}"
     return f"http://{host}"
+
+
+def proxy_map_tile(handler: BaseHTTPRequestHandler, z: str, x: str, y: str) -> None:
+    """Proxy raster tiles over HTTP so Android WebView need not hit HTTPS CDNs."""
+    try:
+        zi, xi, yi = int(z), int(x), int(y)
+    except ValueError:
+        return json_response(handler, 400, {"success": False, "error": "bad tile coords"})
+    if zi < 0 or zi > 19 or xi < 0 or yi < 0:
+        return json_response(handler, 400, {"success": False, "error": "tile out of range"})
+
+    cache_key = f"v2/{zi}/{xi}/{yi}"
+    now = __import__("time").time()
+    cached = _TILE_CACHE.get(cache_key)
+    if cached and now - cached[0] < _TILE_TTL:
+        data, ctype = cached[1], cached[2]
+        handler.send_response(200)
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.send_header("Content-Type", ctype)
+        handler.send_header("Cache-Control", "public, max-age=3600")
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+        return
+
+    # Bright street map (OSM / Carto light) — not dark_all / dark voyager
+    upstreams = [
+        f"https://tile.openstreetmap.org/{zi}/{xi}/{yi}.png",
+        f"https://a.basemaps.cartocdn.com/light_all/{zi}/{xi}/{yi}.png",
+        f"https://b.basemaps.cartocdn.com/light_all/{zi}/{xi}/{yi}.png",
+        f"https://a.basemaps.cartocdn.com/rastertiles/voyager/{zi}/{xi}/{yi}.png",
+    ]
+    last_err = "tile fetch failed"
+    for url in upstreams:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "CmirMapTileProxy/1.0 (lab; +https://github.com/gildcgir/Cmir)",
+                    "Accept": "image/png,image/*;q=0.8,*/*;q=0.5",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = resp.read()
+                ctype = resp.headers.get("Content-Type", "image/png")
+            if len(_TILE_CACHE) >= _TILE_CACHE_MAX:
+                _TILE_CACHE.pop(next(iter(_TILE_CACHE)), None)
+            _TILE_CACHE[cache_key] = (now, data, ctype)
+            handler.send_response(200)
+            handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.send_header("Content-Type", ctype)
+            handler.send_header("Cache-Control", "public, max-age=3600")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)
+            continue
+    return json_response(handler, 502, {"success": False, "error": last_err})
 
 
 def preview_clip_public_url(handler: BaseHTTPRequestHandler, clip_path: str) -> str:
@@ -288,6 +353,12 @@ class Handler(BaseHTTPRequestHandler):
                 {"status": "healthy", "service": "cmir-api-py", "version": "0.4.0", "phase": "2-core", "environment": app_env()},
             )
 
+        # /api/v1/map-tiles/{z}/{x}/{y}.png — HTTP proxy for Leaflet (Android WebView)
+        if len(parts) == 6 and parts[0] == "api" and parts[1] == "v1" and parts[2] == "map-tiles":
+            yname = parts[5]
+            y = yname[:-4] if yname.endswith(".png") else yname
+            return proxy_map_tile(self, parts[3], parts[4], y)
+
         if path == "/api/v1/geocode":
             q = qs.get("q", [""])[0].strip()
             if not q:
@@ -449,6 +520,29 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
 
+        if len(parts) == 5 and parts[2] == "pois" and parts[4] == "replay-clip.mp4":
+            try:
+                payload = STORE.poi_payload(parts[3])
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "not found"})
+            if payload.get("status") not in ("lingering", "published"):
+                return json_response(self, 404, {"success": False, "error": "replay not available"})
+            clip = STORE.get_replay_clip_path(parts[3])
+            if not clip:
+                return json_response(self, 404, {"success": False, "error": "replay not ready"})
+            path = Path(clip)
+            if not path.is_file():
+                return json_response(self, 404, {"success": False, "error": "replay file missing"})
+            data = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Cache-Control", "public, max-age=60")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if len(parts) == 5 and parts[2] == "pois" and parts[4] == "menu-items":
             try:
                 items = STORE.poi_menu_items(parts[3])
@@ -531,7 +625,25 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, 200, {"success": True, "data": data})
 
         if path == "/api/v1/pois":
-            return json_response(self, 200, {"success": True, "data": STORE.list_pois()})
+            want_all = qs.get("all", ["0"])[0] in ("1", "true", "yes")
+            status = qs.get("status", [None])[0]
+            user = STORE.user_from_token(bearer_token(self))
+            if want_all or status == "pending":
+                if not user or not STORE.is_admin(user):
+                    return json_response(self, 403, {"success": False, "error": "admin required"})
+                data = STORE.list_pois(include_all=want_all, status=None if want_all else status)
+            else:
+                data = STORE.list_pois(status="published")
+            return json_response(self, 200, {"success": True, "data": data})
+
+        if len(parts) == 5 and parts[2] == "pois" and parts[4] == "chat":
+            poi_id = parts[3]
+            since = qs.get("since", [None])[0]
+            try:
+                data = STORE.list_chat(poi_id, since=since)
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "poi not found"})
+            return json_response(self, 200, {"success": True, "data": data})
 
         if path == "/api/v1/tops/consent":
             items = STORE.sorted_tops("consent", city, country)
@@ -735,6 +847,46 @@ class Handler(BaseHTTPRequestHandler):
             handle_mask_image_upload(self, parts[3])
             return
 
+        # Host ends broadcast (optional clip upload) — must run before JSON body read
+        if (
+            len(parts) == 6
+            and parts[2] == "pois"
+            and parts[4] == "broadcast"
+            and parts[5] == "end"
+            and "multipart/form-data" in (self.headers.get("Content-Type") or "")
+        ):
+            user = require_user(self)
+            if user is None:
+                return
+            poi_id = parts[3]
+            form = parse_multipart(self)
+            uploaded = None
+            file_part = form.get("clip") or form.get("file")
+            raw = file_part.get("data") if isinstance(file_part, dict) else None
+            if raw:
+                from tempfile import NamedTemporaryFile
+
+                tf = NamedTemporaryFile(delete=False, suffix=".mp4")
+                tf.write(raw)
+                tf.close()
+                uploaded = Path(tf.name)
+            try:
+                data = STORE.end_user_broadcast(user, poi_id, uploaded_clip=uploaded)
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "poi not found"})
+            except PermissionError as e:
+                return json_response(self, 403, {"success": False, "error": str(e)})
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            finally:
+                if uploaded:
+                    try:
+                        uploaded.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            LOCAL_RELAY.force_stop(poi_id)
+            return json_response(self, 200, {"success": True, "data": data})
+
         body = self._read_json()
 
         if path == "/api/v1/auth/register":
@@ -763,10 +915,74 @@ class Handler(BaseHTTPRequestHandler):
             if require_admin(self) is None:
                 return
             try:
-                poi = STORE.create_poi(body)
+                poi = STORE.create_poi({**body, "status": body.get("status", "published")})
             except (KeyError, ValueError) as e:
                 return json_response(self, 400, {"success": False, "error": str(e)})
             return json_response(self, 200, {"success": True, "data": asdict(poi)})
+
+        if path == "/api/v1/pois/submit":
+            user = require_user(self)
+            if user is None:
+                return
+            try:
+                data = STORE.submit_poi(user, body)
+            except (KeyError, ValueError) as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            return json_response(self, 200, {"success": True, "data": data})
+
+        if len(parts) == 5 and parts[2] == "pois" and parts[4] == "chat":
+            user = require_user(self)
+            if user is None:
+                return
+            try:
+                msg = STORE.post_chat(parts[3], user, body.get("body") or body.get("text") or "")
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "poi not found"})
+            except PermissionError as e:
+                return json_response(self, 403, {"success": False, "error": str(e)})
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            return json_response(self, 200, {"success": True, "data": msg})
+
+        if len(parts) == 6 and parts[2] == "pois" and parts[4] == "chat" and parts[5] == "mute":
+            user = require_user(self)
+            if user is None:
+                return
+            if not STORE.is_admin(user) and not STORE.is_poi_host(user, parts[3]):
+                return json_response(self, 403, {"success": False, "error": "host or admin required"})
+            try:
+                data = STORE.mute_chat_user(
+                    parts[3],
+                    body.get("user_id", ""),
+                    user["id"],
+                    hours=body.get("hours"),
+                    reason=body.get("reason") or "",
+                )
+            except (KeyError, ValueError) as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            return json_response(self, 200, {"success": True, "data": data})
+
+        if len(parts) == 5 and parts[2] == "pois" and parts[4] == "approve":
+            if require_admin(self) is None:
+                return
+            try:
+                data = STORE.set_poi_status(parts[3], "published")
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "poi not found"})
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            return json_response(self, 200, {"success": True, "data": data})
+
+        if len(parts) == 5 and parts[2] == "pois" and parts[4] == "reject":
+            if require_admin(self) is None:
+                return
+            try:
+                data = STORE.set_poi_status(parts[3], "rejected")
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "poi not found"})
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            return json_response(self, 200, {"success": True, "data": data})
 
         if path == "/api/v1/admin/users":
             if require_admin(self) is None:
@@ -887,6 +1103,45 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {"success": True, "data": {"clients": LOCAL_RELAY.active_clients(poi_id)}},
             )
+
+        if len(parts) == 6 and parts[2] == "pois" and parts[4] == "broadcast" and parts[5] == "end":
+            user = require_user(self)
+            if user is None:
+                return
+            poi_id = parts[3]
+            uploaded = None
+            ctype = self.headers.get("Content-Type", "")
+            if "multipart/form-data" in ctype:
+                form = parse_multipart(self)
+                file_part = form.get("clip") or form.get("file")
+                raw = None
+                if isinstance(file_part, dict):
+                    raw = file_part.get("data")
+                elif isinstance(file_part, (bytes, bytearray)):
+                    raw = file_part
+                if raw and len(raw) > 0:
+                    from tempfile import NamedTemporaryFile
+
+                    tf = NamedTemporaryFile(delete=False, suffix=".mp4")
+                    tf.write(raw)
+                    tf.close()
+                    uploaded = Path(tf.name)
+            try:
+                data = STORE.end_user_broadcast(user, poi_id, uploaded_clip=uploaded)
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "poi not found"})
+            except PermissionError as e:
+                return json_response(self, 403, {"success": False, "error": str(e)})
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            finally:
+                if uploaded:
+                    try:
+                        uploaded.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            LOCAL_RELAY.force_stop(poi_id)
+            return json_response(self, 200, {"success": True, "data": data})
 
         if len(parts) == 5 and parts[2] == "pois" and parts[4] == "kiosk-register":
             poi_id = parts[3]
@@ -1194,13 +1449,30 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, 200, {"success": True, "data": data})
 
         if len(parts) == 4 and parts[2] == "pois":
-            if require_admin(self) is None:
+            user = require_user(self)
+            if user is None:
                 return
+            poi_id = parts[3]
+            if not STORE.is_admin(user) and not STORE.is_poi_host(user, poi_id):
+                return json_response(self, 403, {"success": False, "error": "host or admin required"})
+            # Hosts may only edit safe metadata fields
+            if not STORE.is_admin(user):
+                allowed = {
+                    k: body[k]
+                    for k in (
+                        "name", "description", "promo_description", "city", "country",
+                        "address", "comment", "facing_mode", "latitude", "longitude",
+                    )
+                    if k in body
+                }
+                body = allowed
             try:
-                STORE.update_poi(parts[3], body)
-                data = STORE.poi_payload(parts[3])
+                STORE.update_poi(poi_id, body)
+                data = STORE.poi_payload(poi_id)
             except KeyError:
                 return json_response(self, 404, {"success": False, "error": "poi not found"})
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
             return json_response(self, 200, {"success": True, "data": data})
 
         if len(parts) == 4 and parts[2] == "cameras":
@@ -1244,9 +1516,31 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, 404, {"success": False, "error": "poi not found"})
             return json_response(self, 200, {"success": True, "message": "poi deleted"})
 
+        if len(parts) == 6 and parts[2] == "pois" and parts[4] == "chat":
+            user = require_user(self)
+            if user is None:
+                return
+            if not STORE.is_admin(user) and not STORE.is_poi_host(user, parts[3]):
+                return json_response(self, 403, {"success": False, "error": "host or admin required"})
+            try:
+                STORE.delete_chat_message(parts[3], parts[5])
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "message not found"})
+            return json_response(self, 200, {"success": True, "message": "deleted"})
+
+        if len(parts) == 7 and parts[2] == "pois" and parts[4] == "chat" and parts[5] == "mute":
+            user = require_user(self)
+            if user is None:
+                return
+            if not STORE.is_admin(user) and not STORE.is_poi_host(user, parts[3]):
+                return json_response(self, 403, {"success": False, "error": "host or admin required"})
+            STORE.unmute_chat_user(parts[3], parts[6])
+            return json_response(self, 200, {"success": True, "message": "unmuted"})
+
         if len(parts) == 5 and parts[2] == "pois" and parts[4] == "mask-image":
             if require_admin(self) is None:
                 return
+            # fall through to existing mask delete below — keep original handler
             STORE.delete_mask_image(parts[3])
             LOCAL_RELAY.restart_poi(parts[3])
             return json_response(self, 200, {"success": True, "message": "mask removed"})

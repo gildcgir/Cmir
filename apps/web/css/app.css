@@ -1,27 +1,87 @@
 :root {
   --bg: #0a0e14;
-  --panel: rgba(18, 24, 36, 0.88);
+  --panel: rgba(18, 24, 36, 0.92);
   --border: #2a3548;
   --text: #e8edf5;
   --muted: #8a96a8;
   --accent: #4d9fff;
   --accent2: #2d6a9f;
   --danger: #e74c3c;
-  --nav-h: 52px;
+  --nav-h: 56px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* Stream itself is exactly 1/3 of the viewport */
+  --video-preview-h: 33.333dvh;
+  --poi-chrome-h: 7.75rem; /* title + status + action buttons */
+  --chat-sheet-h: 30vh;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
 
 body {
   font-family: system-ui, -apple-system, sans-serif;
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
+  min-height: 100dvh;
+  padding-bottom: calc(var(--nav-h) + var(--safe-bottom));
 }
 
 a { color: var(--accent); text-decoration: none; }
 
-/* --- User nav --- */
+.boot-status {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 1rem;
+  padding: 1.5rem;
+  text-align: center;
+}
+.boot-status--err {
+  color: #ffb4b4;
+  background: #1a1010;
+}
+
+/* --- Bottom nav --- */
+.bottomnav {
+  height: calc(var(--nav-h) + var(--safe-bottom));
+  padding: 0 0.35rem var(--safe-bottom);
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  align-items: center;
+  gap: 0.25rem;
+  background: #121a28;
+  border-top: 1px solid var(--border);
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+}
+
+.bottomnav .tab-btn {
+  justify-self: stretch;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  color: var(--muted);
+}
+
+.bottomnav a.tab-btn:hover,
+.bottomnav a.tab-btn:focus {
+  color: var(--text);
+}
+
+/* Admin still uses topnav */
 .topnav {
   height: var(--nav-h);
   display: flex;
@@ -45,6 +105,7 @@ a { color: var(--accent); text-decoration: none; }
   border-radius: 8px;
   cursor: pointer;
   font-weight: 600;
+  font-size: 0.95rem;
 }
 
 .tab-btn.active {
@@ -59,25 +120,43 @@ a { color: var(--accent); text-decoration: none; }
   color: var(--accent);
 }
 
-/* --- Views --- */
-.view { display: none; min-height: calc(100vh - var(--nav-h)); }
+.tab-label { pointer-events: none; }
+
+.view {
+  display: none;
+  min-height: calc(100vh - var(--nav-h) - var(--safe-bottom));
+}
 .view.active { display: block; }
 
-/* --- Map fullscreen --- */
 #mapView {
   position: fixed;
-  top: var(--nav-h);
+  top: 0;
   left: 0;
   right: 0;
-  bottom: 0;
+  bottom: calc(var(--nav-h) + var(--safe-bottom));
   padding-top: 0;
   min-height: 0;
+  z-index: 1;
+  background: #dce6f0;
 }
-#map { width: 100%; height: 100%; min-height: 240px; z-index: 1; }
+#mapView.active { display: block; }
+#mapView:not(.active) { display: none !important; }
+#map {
+  width: 100%;
+  height: 100%;
+  min-height: 240px;
+  z-index: 1;
+  background: #dce6f0;
+}
+#map .leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #dce6f0;
+}
 
 .map-status {
-  position: fixed;
-  top: calc(var(--nav-h) + 0.75rem);
+  position: absolute;
+  top: calc(var(--safe-top) + 0.75rem);
   left: 50%;
   transform: translateX(-50%);
   z-index: 1200;
@@ -96,44 +175,88 @@ a { color: var(--accent); text-decoration: none; }
   color: #ffb4b4;
 }
 
+/* Video sheet: stream = exactly 1/3 screen; chrome sits under it */
 #poiPanel {
-  position: fixed;
-  top: var(--nav-h);
+  position: absolute;
+  top: auto;
+  bottom: 0;
+  left: 0;
   right: 0;
-  width: 25%;
-  min-width: 280px;
-  max-width: 420px;
-  height: calc(100vh - var(--nav-h));
+  width: 100%;
+  height: calc(var(--video-preview-h) + var(--poi-chrome-h));
+  min-height: calc(var(--video-preview-h) + 140px);
+  max-height: calc(var(--video-preview-h) + var(--poi-chrome-h) + 1.5rem);
   background: var(--panel);
   backdrop-filter: blur(10px);
-  border-left: 1px solid var(--border);
-  padding: 1rem;
+  border-top: 1px solid var(--border);
+  border-bottom: none;
+  border-left: none;
+  padding: 0.45rem 0.75rem 0.55rem;
   display: none;
   flex-direction: column;
   z-index: 900;
-  overflow-y: auto;
+  overflow: hidden;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.35);
+  transition: height 0.22s ease, max-height 0.22s ease;
 }
 
 #poiPanel.open { display: flex; }
 
-#poiPanel h2 { font-size: 1rem; margin-bottom: 0.35rem; }
-#poiPanel .addr { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.75rem; }
-#poiPanel .comment { font-size: 0.85rem; margin-bottom: 0.75rem; line-height: 1.4; }
+/* Chat open: sheet grows upward over the map; video stays 1/3 */
+#poiPanel.open.chat-open {
+  height: calc(var(--video-preview-h) + var(--poi-chrome-h) + var(--chat-sheet-h));
+  max-height: min(88dvh, calc(var(--video-preview-h) + var(--poi-chrome-h) + var(--chat-sheet-h)));
+}
+
+.poi-panel-meta {
+  flex: 0 0 auto;
+  padding-right: 2rem;
+  margin-bottom: 0.25rem;
+}
+
+#poiPanel h2 {
+  font-size: 0.9rem;
+  margin-bottom: 0.1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#poiPanel .addr {
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-bottom: 0.1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#poiPanel .comment { display: none; }
 
 .preview-wrap {
   position: relative;
   width: 100%;
-  aspect-ratio: 16/9;
+  flex: 0 0 var(--video-preview-h);
+  height: var(--video-preview-h);
+  min-height: var(--video-preview-h);
+  max-height: var(--video-preview-h);
+  aspect-ratio: auto;
   background: #000;
   border-radius: 10px;
   overflow: hidden;
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.3rem;
 }
 
 .preview-wrap video {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
+  background: #000;
+}
+
+/* When showing raw device camera (no mask canvas), keep video visible */
+.preview-wrap video:not(.live-source-hidden) {
+  position: relative;
+  z-index: 1;
 }
 
 video.live-source-hidden {
@@ -163,7 +286,10 @@ video.live-source-hidden {
   pointer-events: none;
 }
 
-.panel-actions { display: flex; flex-direction: column; gap: 0.5rem; margin-top: auto; }
+.poi-panel-footer { flex: 0 0 auto; }
+
+.panel-actions { display: flex; flex-direction: column; gap: 0.35rem; }
+.panel-actions .primary { padding: 0.45rem 0.75rem; font-size: 0.85rem; }
 
 button.primary {
   background: var(--accent);
@@ -185,22 +311,104 @@ button.secondary {
 }
 
 button.close-panel {
-  align-self: flex-end;
-  background: transparent;
+  position: absolute;
+  top: 0.35rem;
+  right: 0.45rem;
+  z-index: 2;
+  background: rgba(0, 0, 0, 0.45);
   border: none;
-  color: var(--muted);
+  color: var(--text);
   cursor: pointer;
   font-size: 1.25rem;
-  margin-bottom: 0.25rem;
+  width: 36px;
+  height: 36px;
+  border-radius: 18px;
+  margin-bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-/* --- Account --- */
 #accountView {
-  padding-top: var(--nav-h);
-  max-width: 420px;
-  margin: 0 auto;
-  padding: calc(var(--nav-h) + 1rem) 1rem 2rem;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--nav-h) + var(--safe-bottom));
+  z-index: 2;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--bg);
+  padding-top: calc(var(--safe-top) + 1rem);
+  padding-left: 1rem;
+  padding-right: 1rem;
+  padding-bottom: 2rem;
+  max-width: none;
 }
+#accountView.active { display: block; }
+#accountView:not(.active) { display: none !important; }
+#accountView > * {
+  max-width: 420px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.account-extra-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.account-extra-links a {
+  display: block;
+  padding: 0.65rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #121a28;
+  font-weight: 600;
+}
+
+@media (min-width: 900px) {
+  #poiPanel {
+    top: 0;
+    bottom: 0;
+    right: 0;
+    left: auto;
+    width: min(360px, 32vw);
+    height: 100%;
+    min-height: 0;
+    max-height: none;
+    border-top: none;
+    border-bottom: none;
+    border-left: 1px solid var(--border);
+    padding: 1rem;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+  }
+  #poiPanel.open.chat-open {
+    height: 100%;
+    max-height: none;
+  }
+  #poiPanel .comment { display: block; font-size: 0.85rem; margin-bottom: 0.75rem; line-height: 1.4; }
+  .preview-wrap { flex: 0 0 auto; aspect-ratio: 16/9; height: auto; max-height: none; min-height: 0; }
+  #poiPanel.chat-open .poi-chat {
+    height: auto;
+    flex: 1 1 auto;
+  }
+  button.close-panel {
+    position: static;
+    align-self: flex-end;
+    background: transparent;
+    color: var(--muted);
+    margin-bottom: 0.25rem;
+  }
+  .poi-panel-meta { padding-right: 0; }
+  .panel-actions { margin-top: auto; }
+  .panel-actions .primary { font-size: 1rem; padding: 0.65rem 1rem; }
+}
+
 
 .auth-tabs {
   display: flex;
@@ -530,4 +738,76 @@ table.users tr.selected { background: #1e2d44; }
   background: #2a3548;
   color: var(--muted);
   margin-left: 0.5rem;
+}
+
+/* Map FAB + POI chat */
+.map-fab {
+  position: absolute;
+  right: 12px;
+  bottom: calc(var(--bottom-nav-h, 56px) + 16px);
+  z-index: 850;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.65rem 1rem;
+  background: #4d9fff;
+  color: #0a0e14;
+  font-weight: 700;
+  font-size: 0.9rem;
+  box-shadow: 0 6px 18px rgba(0,0,0,.35);
+}
+.poi-chat {
+  display: none;
+  margin-top: 0.45rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.45rem;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  height: calc(var(--chat-sheet-h) - 0.5rem);
+}
+#poiPanel.chat-open .poi-chat {
+  display: flex;
+}
+.poi-chat[hidden] {
+  display: none !important;
+}
+.poi-chat-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+.poi-chat-msg {
+  padding: 0.2rem 0;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: baseline;
+}
+.poi-chat-msg strong { color: #9ec5ff; }
+.poi-chat-del, .poi-chat-mute {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: #ff8a80;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0 0.2rem;
+}
+.poi-chat-form {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+.poi-chat-form input {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.5rem;
+}
+.poi-chat-form button {
+  width: auto;
+  padding: 0.4rem 0.65rem;
 }

@@ -1,9 +1,11 @@
-"""Одна чёрная плашка на лицо (полицейская хроника) — keypoints MediaPipe."""
+"""Одна чёрная плашка на лицо / глаза — keypoints (MediaPipe или SCRFD)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import math
+
+import numpy as np
 
 Box = Tuple[int, int, int, int]
 
@@ -13,6 +15,88 @@ def _clamp_box(x: int, y: int, bw: int, bh: int, fw: int, fh: int) -> Box:
     x = max(0, min(x, fw - 1))
     y = max(0, min(y, fh - 1))
     return x, y, min(bw, fw - x), min(bh, fh - y)
+
+
+def eye_bar_from_kps(
+    kps: np.ndarray,
+    frame_w: int,
+    frame_h: int,
+    pad: float = 0.22,
+) -> Tuple[Tuple[float, float], float, float, float]:
+    """
+    Returns (center_xy, width, height, angle_rad) for a rotated eye bar.
+    Uses left/right eye keypoints; pad expands size for profile fail-safe.
+    """
+    pts = np.asarray(kps, dtype=np.float32).reshape(-1, 2)
+    if len(pts) < 2:
+        raise ValueError("need eye keypoints")
+    p0, p1 = pts[0], pts[1]
+    if p0[0] <= p1[0]:
+        left, right = p0, p1
+    else:
+        left, right = p1, p0
+    dx, dy = float(right[0] - left[0]), float(right[1] - left[1])
+    eye_dist = math.hypot(dx, dy) or 1.0
+    angle = math.atan2(dy, dx)
+    cx = (left[0] + right[0]) / 2.0
+    cy = (left[1] + right[1]) / 2.0
+    scale = 1.0 + max(0.0, pad)
+    bar_w = max(28.0, eye_dist * 1.55 * scale)
+    bar_h = max(16.0, bar_w * 0.48)
+    cy -= bar_h * 0.06
+    return (cx, cy), bar_w, bar_h, angle
+
+
+def draw_rotated_eye_bar(
+    frame,
+    kps: np.ndarray,
+    pad: float = 0.22,
+    color: Tuple[int, int, int] = (0, 0, 0),
+) -> bool:
+    """Affine / rotated solid bar covering both eyes. Returns True if drawn."""
+    import cv2
+
+    fh, fw = frame.shape[:2]
+    try:
+        (cx, cy), bar_w, bar_h, angle = eye_bar_from_kps(kps, fw, fh, pad=pad)
+    except Exception:
+        return False
+    rect = ((cx, cy), (bar_w, bar_h), math.degrees(angle))
+    box = cv2.boxPoints(rect)
+    box = np.int32(box)
+    cv2.fillConvexPoly(frame, box, color)
+    pts = np.asarray(kps, dtype=np.float32).reshape(-1, 2)
+    p0, p1 = pts[0], pts[1]
+    thickness = max(8, int(bar_h * 0.55))
+    cv2.line(
+        frame,
+        (int(p0[0]), int(p0[1])),
+        (int(p1[0]), int(p1[1])),
+        color,
+        thickness=thickness,
+        lineType=cv2.LINE_AA,
+    )
+    return True
+
+
+def draw_eye_privacy(
+    frame,
+    bbox: Box,
+    kps: Optional[np.ndarray] = None,
+    pad: float = 0.22,
+) -> None:
+    """Prefer keypoint-aligned bar; fall back to horizontal box over upper face."""
+    import cv2
+
+    if kps is not None and len(np.asarray(kps).reshape(-1, 2)) >= 2:
+        if draw_rotated_eye_bar(frame, kps, pad=pad):
+            return
+    x, y, bw, bh = bbox
+    bar_y = y + int(bh * 0.22)
+    bar_h = max(16, int(bh * 0.38 * (1 + pad)))
+    bar_x = max(0, x - int(bw * pad * 0.5))
+    bar_w = min(frame.shape[1] - bar_x, int(bw * (1 + pad)))
+    cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (0, 0, 0), thickness=-1)
 
 
 def eye_rects_from_detection(det, frame_w: int, frame_h: int) -> List[Box]:
@@ -59,7 +143,6 @@ def draw_eye_rects(frame, rects: List[Box]) -> None:
 def draw_mask_image(frame, bar: Box, image_bgra) -> None:
     """Наложить картинку маски вместо чёрного прямоугольника."""
     import cv2
-    import numpy as np
 
     x, y, bw, bh = bar
     if image_bgra is None or bw < 4 or bh < 4:
@@ -79,7 +162,6 @@ def draw_mask_image(frame, bar: Box, image_bgra) -> None:
 def face_bar_from_detection(det, frame_w: int, frame_h: int) -> Box | None:
     """
     Горизонтальная плашка по центру лица: закрывает глаза и верхнюю часть лица.
-    Ширина ~1.25× расстояние между глазами, высота ~0.55× ширины.
     """
     loc = det.location_data
     kps = loc.relative_keypoints
@@ -107,7 +189,6 @@ def face_bar_from_detection(det, frame_w: int, frame_h: int) -> Box | None:
 
     bar_w = max(36, int(eye_dist * 1.28))
     bar_h = max(22, int(bar_w * 0.52))
-    # чуть выше центра глаз — типичная «хроника»
     cy = cy - bar_h * 0.08
 
     return _clamp_box(int(cx - bar_w / 2), int(cy - bar_h / 2), bar_w, bar_h, w, h)

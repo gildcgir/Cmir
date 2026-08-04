@@ -3,4 +3,8 @@
     <string name="app_name">Cmir</string>
     <!-- Production host after deploy. Emulator lab: http://10.0.2.2:3000/ -->
     <string name="cmir_web_base">https://app.cmir.live/</string>
+    <string name="camera_disclosure_title">Доступ к камере</string>
+    <string name="camera_disclosure_message">Cmir использует камеру, чтобы показывать трансляции с маской на области глаз и регистрировать согласие в киоске. Без камеры карта доступна, но превью и киоск не смогут снимать видео. Данные лица обрабатываются только для маскирования и согласия — подробности в Политике конфиденциальности.</string>
+    <string name="camera_disclosure_continue">Продолжить</string>
+    <string name="camera_disclosure_cancel">Не сейчас</string>
 </resources>

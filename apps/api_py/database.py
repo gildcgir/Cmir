@@ -341,6 +341,28 @@ CREATE TABLE IF NOT EXISTS stream_presence_rewards (
 
 CREATE INDEX IF NOT EXISTS idx_stream_rewards_stream ON stream_presence_rewards(stream_id);
 CREATE INDEX IF NOT EXISTS idx_stream_rewards_user ON stream_presence_rewards(user_id);
+
+CREATE TABLE IF NOT EXISTS poi_chat_messages (
+    id TEXT PRIMARY KEY,
+    poi_id TEXT NOT NULL REFERENCES pois(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS poi_chat_mutes (
+    poi_id TEXT NOT NULL REFERENCES pois(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    muted_until TEXT,
+    muted_by TEXT,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (poi_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_poi_created ON poi_chat_messages(poi_id, created_at);
 """
 
 
@@ -359,6 +381,12 @@ MIGRATIONS = [
     "ALTER TABLE performance_streams ADD COLUMN recording_id TEXT",
     "ALTER TABLE performance_streams ADD COLUMN clip_path TEXT",
     "ALTER TABLE performance_streams ADD COLUMN clip_status TEXT",
+    "ALTER TABLE pois ADD COLUMN status TEXT NOT NULL DEFAULT 'published'",
+    "ALTER TABLE pois ADD COLUMN submitted_by TEXT",
+    "ALTER TABLE pois ADD COLUMN facing_mode TEXT NOT NULL DEFAULT 'user'",
+    "ALTER TABLE pois ADD COLUMN linger_until TEXT",
+    "ALTER TABLE pois ADD COLUMN replay_clip_path TEXT",
+    "ALTER TABLE pois ADD COLUMN live_ended_at TEXT",
 ]
 
 
@@ -375,6 +403,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         if col in ("device_id", "slot_index", "is_preview", "source_type", "device_label") and col in cam_cols:
             continue
         if col == "menu_items_json" and col in poi_cols:
+            continue
+        if col in ("status", "submitted_by", "facing_mode", "linger_until", "replay_clip_path", "live_ended_at") and col in poi_cols:
             continue
         try:
             conn.execute(sql)

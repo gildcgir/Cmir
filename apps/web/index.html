@@ -2,42 +2,76 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0e14" />
   <title>Cmir — карта мест</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="css/app.css" />
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+  <link rel="stylesheet" href="css/app.css?v=map-chat3" />
+  <script src="vendor/hls/hls.min.js" defer></script>
+  <script src="vendor/leaflet/leaflet.js" defer></script>
 </head>
 <body>
-  <nav class="topnav">
-    <h1>Cmir</h1>
-    <button type="button" class="tab-btn active" data-view="map" id="tabMap">Карта</button>
-    <button type="button" class="tab-btn" data-view="account" id="tabAccount">Аккаунт</button>
-    <a href="admin.html" class="tab-btn admin-link" id="adminLink" style="display:none">Админ-панель</a>
-    <a href="kiosk/index.html" class="tab-btn admin-link" id="kioskLink">Киоск согласия</a>
-    <a href="performance.html" class="tab-btn admin-link" id="performanceLink">Перфоманс</a>
-  </nav>
+  <div id="bootStatus" class="boot-status" role="status">Загрузка…</div>
 
   <!-- Пользовательский контур: карта -->
   <section id="mapView" class="view active">
     <div id="map"></div>
     <div id="mapStatus" class="map-status" style="display:none" role="status"></div>
-    <aside id="poiPanel">
+    <aside id="poiPanel" aria-label="Превью места">
       <button type="button" class="close-panel" id="closePanel" aria-label="Закрыть">×</button>
-      <h2 id="panelTitle">Место</h2>
-      <p class="addr" id="panelAddr"></p>
-      <p class="comment" id="panelComment"></p>
+      <div class="poi-panel-meta">
+        <h2 id="panelTitle">Место</h2>
+        <p class="addr" id="panelAddr"></p>
+        <p class="comment" id="panelComment"></p>
+      </div>
       <div class="preview-wrap privacy-composite">
         <video id="previewVideo" class="live-source-hidden" muted playsinline autoplay></video>
         <canvas id="previewMaskCanvas" class="mask-overlay-canvas"></canvas>
       </div>
-      <p class="addr" id="panelPreviewStatus"></p>
-      <p class="addr">Превью: 10 с записи с эфира (зациклено, после старта потока)</p>
-      <div class="panel-actions">
-        <button type="button" class="primary" id="btnFullscreen">Открыть трансляцию на весь экран</button>
+      <div class="poi-panel-footer">
+        <p class="addr" id="panelPreviewStatus"></p>
+        <div class="panel-actions">
+          <button type="button" class="primary" id="btnFullscreen">Трансляция на весь экран</button>
+          <button type="button" class="secondary" id="btnEndBroadcast" hidden>Завершить трансляцию</button>
+          <button type="button" class="secondary" id="btnToggleChat" aria-expanded="false">Чат места</button>
+        </div>
+        <div class="poi-chat" id="poiChat" hidden>
+          <div class="poi-chat-log" id="poiChatLog" aria-live="polite"></div>
+          <form class="poi-chat-form" id="poiChatForm">
+            <input id="poiChatInput" type="text" maxlength="1000" placeholder="Сообщение…" autocomplete="off" />
+            <button type="submit" class="primary">↵</button>
+          </form>
+          <p class="hint" id="poiChatHint"></p>
+        </div>
       </div>
     </aside>
+    <button type="button" class="map-fab" id="btnAddPlace" title="Предложить место">＋ Место</button>
   </section>
+
+  <div class="modal-backdrop" id="addPlaceModal">
+    <div class="modal" role="dialog" aria-labelledby="addPlaceTitle">
+      <h2 id="addPlaceTitle">Предложить место</h2>
+      <p class="hint">После модерации администратором место появится на карте. Поток — с вашей камеры.</p>
+      <form id="formAddPlace">
+        <input id="addPlaceName" placeholder="Название" required />
+        <input id="addPlaceAddress" placeholder="Адрес" />
+        <textarea id="addPlaceComment" placeholder="Комментарий"></textarea>
+        <label class="hint" for="addPlaceFacing">Камера для эфира</label>
+        <select id="addPlaceFacing">
+          <option value="user">Фронтальная (селфи)</option>
+          <option value="environment">Задняя</option>
+        </select>
+        <input type="hidden" id="addPlaceLat" />
+        <input type="hidden" id="addPlaceLng" />
+        <p class="hint" id="addPlaceCoords"></p>
+        <p class="msg" id="addPlaceMsg"></p>
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="btnCancelAddPlace">Отмена</button>
+          <button type="submit" class="primary">Отправить на модерацию</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <!-- Пользовательский контур: аккаунт -->
   <section id="accountView" class="view">
@@ -59,6 +93,11 @@
       </form>
       <p class="hint">После киоска согласия вход — по телефону и выданному паролю.</p>
       <p class="msg" id="authMsg"></p>
+      <nav class="account-extra-links" aria-label="Дополнительно">
+        <a href="performance.html" id="performanceLinkGuest">Перфоманс</a>
+        <a href="privacy.html">Конфиденциальность</a>
+        <a href="terms.html">Условия</a>
+      </nav>
     </div>
     <div id="authUser" class="user-card" style="display:none">
       <p id="authStatus"></p>
@@ -98,20 +137,70 @@
         <button type="button" class="secondary" id="btnLinkPlatform" style="width:100%;margin-top:0.5rem">Сохранить никнейм</button>
         <button type="button" class="secondary" id="btnOAuthPlatform" style="width:100%;margin-top:0.35rem">OAuth (полный доступ)</button>
       </div>
+      <nav class="account-extra-links">
+        <a href="performance.html" id="performanceLink">Перфоманс</a>
+        <a href="admin.html" id="adminLink" style="display:none">Админ-панель</a>
+        <a href="privacy.html">Конфиденциальность</a>
+        <a href="terms.html">Условия</a>
+      </nav>
       <button type="button" class="secondary" id="btnLogout" style="margin-top:0.75rem">Выйти</button>
     </div>
   </section>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <nav class="bottomnav" aria-label="Основная навигация">
+    <button type="button" class="tab-btn active" data-view="map" id="tabMap">
+      <span class="tab-label">Карта</span>
+    </button>
+    <a class="tab-btn tab-link" href="kiosk/index.html?v=enroll6" id="tabKiosk">
+      <span class="tab-label">Киоск</span>
+    </a>
+    <button type="button" class="tab-btn" data-view="account" id="tabAccount">
+      <span class="tab-label">Аккаунт</span>
+    </button>
+  </nav>
+
   <script type="module">
-    import { initUser } from "./js/user.js";
-    if (location.hash === "#account") {
-      document.querySelector('.tab-btn[data-view="account"]').click();
+    function hideBoot(msg) {
+      const el = document.getElementById("bootStatus");
+      if (!el) return;
+      if (msg) {
+        el.textContent = msg;
+        el.classList.add("boot-status--err");
+        return;
+      }
+      el.remove();
     }
-    initUser().catch((e) => {
+
+    function waitForLeaflet(timeoutMs = 8000) {
+      const getL = () => globalThis.L;
+      if (getL()) return Promise.resolve(getL());
+      return new Promise((resolve, reject) => {
+        const t0 = Date.now();
+        const id = setInterval(() => {
+          const L = getL();
+          if (L) {
+            clearInterval(id);
+            resolve(L);
+          } else if (Date.now() - t0 > timeoutMs) {
+            clearInterval(id);
+            reject(new Error("Leaflet не загрузился"));
+          }
+        }, 30);
+      });
+    }
+
+    try {
+      await waitForLeaflet();
+      const { initUser } = await import("./js/user.js?v=camfix10");
+      await initUser();
+      if (location.hash === "#account") {
+        document.getElementById("tabAccount")?.click();
+      }
+      hideBoot();
+    } catch (e) {
       console.error(e);
-      alert("Ошибка загрузки: " + e.message);
-    });
+      hideBoot("Ошибка загрузки: " + (e?.message || e));
+    }
   </script>
 </body>
 </html>

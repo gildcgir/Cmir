@@ -26,4 +26,11 @@
 **/.pytest_cache/
 apps/web/media/
 apps/ingest/samples/
-*.mp4
+# Android / IDE / local
+apps/android/.gradle/
+apps/android/.idea/
+apps/android/.kotlin/
+apps/android/**/build/
+apps/android/local.properties
+apps/android/app/build/
+**/node_modules/

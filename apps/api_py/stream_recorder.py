@@ -96,6 +96,39 @@ class StreamRecorder:
             return raw if raw.is_file() else None
         return clip if clip.is_file() and clip.stat().st_size > 0 else raw
 
+    def process_tail_clip(self, recording_id: str, raw: Path, seconds: int = 300) -> Optional[Path]:
+        """Cut the last `seconds` of a recording for post-stream map linger."""
+        if not raw.is_file() or raw.stat().st_size == 0:
+            return None
+        out = raw.parent / f"linger_{int(seconds)}s.mp4"
+        # -sseof seeks from end; re-encode for broad player compatibility
+        cmd = [
+            FFMPEG,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-sseof",
+            f"-{max(1, int(seconds))}",
+            "-i",
+            str(raw),
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-movflags",
+            "+faststart",
+            str(out),
+        ]
+        try:
+            subprocess.run(cmd, check=True, timeout=180)
+        except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+            return self.process_clip(recording_id, raw)
+        if out.is_file() and out.stat().st_size > 0:
+            return out
+        return self.process_clip(recording_id, raw)
+
     def process_async(self, recording_id: str, raw: Path, on_done) -> None:
         def _run() -> None:
             clip = self.process_clip(recording_id, raw)

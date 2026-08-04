@@ -3,8 +3,8 @@ Phase 0–1: video → face detect → eye black bars (or emoji) unless consente
 
 Usage:
   python -m cmir_face.worker --input demo.mp4 --output out.mp4
-  python -m cmir_face.worker --input demo.mp4 --output out.mp4 \\
-    --api-url http://localhost:8090 --poi-id <uuid>
+  python -m cmir_face.worker --input rtsp://... --output rtmp://... \
+    --detector scrfd --tile --bbox-pad 0.2
 """
 
 from __future__ import annotations
@@ -16,28 +16,23 @@ from pathlib import Path
 import numpy as np
 
 from cmir_face.avatar_sprite import DEFAULT_OVERLAY_SCALE, EMOJI_IDS, get_sprite, overlay_sprite
+from cmir_face.byte_tracker import ByteFaceTracker
 from cmir_face.embeddings import (
     fetch_consented_faces_from_api,
-    fetch_embeddings_from_api,
     load_embeddings_json,
     match_consented_face,
     patch_from_bbox,
     post_face_presence,
 )
 from cmir_face.eye_mask import (
-    FaceBarTracker,
-    bbox_from_detection,
-    draw_eye_rects,
+    draw_eye_privacy,
     draw_face_bar,
     draw_mask_image,
-    eye_rects_from_detections,
-    face_bars_from_detections,
 )
-from cmir_face.face_box import detections_to_boxes
 from cmir_face.privacy_gate import PrivacyGate
 from cmir_face.rtmp_writer import FfmpegRtmpWriter
 from cmir_face.rtsp_capture import FfmpegRtspCapture
-from cmir_face.tracker import FaceTracker
+from cmir_face.scrfd_detector import FaceHit, create_detector, pad_box
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--demo-fallback",
         action="store_true",
-        help="If MediaPipe finds no face, use moving demo bbox (Phase 0 synthetic video)",
+        help="If detector finds no face, use moving demo bbox (Phase 0 synthetic video)",
     )
     p.add_argument("--max-frames", type=int, default=0, help="Stop after N frames (0=all)")
     p.add_argument("--consent-threshold", type=float, default=0.0, help="Match threshold override")
@@ -74,8 +69,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--track-smooth",
         type=float,
-        default=0.55,
-        help="Smoothing for eye bars / face box (higher = stickier)",
+        default=0.45,
+        help="EMA position smoothing (higher = stickier)",
     )
     p.add_argument(
         "--overlay-scale",
@@ -89,6 +84,26 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=300,
         help="Задержка выходного буфера (мс): кадр анализируется до публикации",
+    )
+    p.add_argument(
+        "--detector",
+        default="auto",
+        choices=("auto", "scrfd", "mediapipe"),
+        help="Face engine: SCRFD/InsightFace (crowd/small faces) or MediaPipe fallback",
+    )
+    p.add_argument(
+        "--tile",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="SAHI-style tiling for small faces on large frames (SCRFD)",
+    )
+    p.add_argument("--tile-grid", default="2x2", help="Tile grid e.g. 2x2 or 3x3")
+    p.add_argument("--det-size", type=int, default=640, help="SCRFD input size")
+    p.add_argument(
+        "--bbox-pad",
+        type=float,
+        default=0.2,
+        help="Expand face/eye mask boxes by this fraction (0.2 = +20%%)",
     )
     return p.parse_args()
 
@@ -112,14 +127,18 @@ def run(
     consent_threshold: float = 0.0,
     mask_mode: str = "face-bar",
     emoji_id: str = "stylized",
-    track_smooth: float = 0.55,
+    track_smooth: float = 0.45,
     overlay_scale: float = DEFAULT_OVERLAY_SCALE,
     mask_image_path: str = "",
     output_delay_ms: int = 900,
+    detector_kind: str = "auto",
+    tile: bool = True,
+    tile_grid: str = "2x2",
+    det_size: int = 640,
+    bbox_pad: float = 0.2,
 ) -> int:
     try:
         import cv2
-        import mediapipe as mp
     except ImportError:
         print("Install: pip install -r requirements.txt", file=sys.stderr)
         return 1
@@ -179,15 +198,30 @@ def run(
 
     match_threshold = consent_threshold if consent_threshold > 0 else 0.85
 
-    mp_face = mp.solutions.face_detection
-    # model 1 = full range (лучше для GoPro / средних дистанций)
-    min_conf = 0.35
-    detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=min_conf)
+    try:
+        detector, det_name = create_detector(
+            kind=detector_kind,
+            tile=tile,
+            det_size=det_size,
+            tile_grid=tile_grid,
+        )
+    except Exception as e:
+        print(f"Detector init failed: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"Detector: {det_name} | tile={tile} grid={tile_grid} | bbox_pad={bbox_pad} | det_size={det_size}",
+        flush=True,
+    )
 
     use_emoji = mask_mode == "emoji"
     use_eye_rect = mask_mode == "eye-rect"
-    face_tracker = FaceTracker(pos_smooth=track_smooth, size_smooth=max(0.22, track_smooth - 0.12))
-    bar_tracker = FaceBarTracker(pos_smooth=track_smooth, size_smooth=max(0.25, track_smooth - 0.15))
+    tracker = ByteFaceTracker(
+        pos_smooth=track_smooth,
+        size_smooth=max(0.22, track_smooth - 0.12),
+        kps_smooth=max(0.35, track_smooth),
+        bbox_pad=bbox_pad,
+        max_missed=22,
+    )
     sprite = get_sprite(emoji_id, size=384) if use_emoji else None
     mask_img = None
     if mask_image_path:
@@ -200,8 +234,7 @@ def run(
     )
 
     delay_frames = max(1, int(fps * output_delay_ms / 1000.0))
-    privacy_gate = PrivacyGate(delay_frames=delay_frames, face_ttl=12, expand=1.2)
-    fast_bar_tracker = FaceBarTracker(pos_smooth=0.35, size_smooth=0.3)
+    privacy_gate = PrivacyGate(delay_frames=delay_frames, face_ttl=14, expand=1.0 + bbox_pad)
     presence_acc: dict[str, float] = {}
     frame_dt = 1.0 / max(fps, 1.0)
 
@@ -221,8 +254,6 @@ def run(
         post_face_presence(api_url, camera_id, items, os.environ.get("CMIR_WORKER_TOKEN", ""))
 
     def draw_name_under_chin(out, fx: int, fy: int, fbw: int, fbh: int, name: str) -> None:
-        import cv2
-
         if not name:
             return
         chin_y = fy + int(fbh * 0.92)
@@ -243,76 +274,38 @@ def run(
         )
         cv2.putText(out, name, (tx, ty), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
-    def _draw_privacy_at_detection(out, det, fw: int, fh: int) -> None:
-        fx, fy, fbw, fbh = bbox_from_detection(det, fw, fh)
-        expanded = privacy_gate.expand_box(fx, fy, fbw, fbh, fw, fh)
-        sig = patch_from_bbox(out, fx, fy, fbw, fbh)
-        hit = match_consented_face(sig, consented_faces, threshold=match_threshold)
-        matched_name = (hit or {}).get("display_name") or ""
-        if hit and hit.get("user_id"):
-            presence_acc[hit["user_id"]] = presence_acc.get(hit["user_id"], 0.0) + frame_dt
-        if matched_name:
-            nonlocal real_count
-            real_count += 1
-            draw_name_under_chin(out, fx, fy, fbw, fbh, matched_name)
-            return
-        nonlocal avatar_count
-        avatar_count += 1
-        if mask_img is not None:
-            draw_mask_image(out, expanded, mask_img)
-        elif use_eye_rect:
-            draw_eye_rects(out, eye_rects_from_detections([det], fw, fh))
-        elif use_emoji and sprite is not None:
-            overlay_sprite(out, sprite, expanded, overlay_scale)
-        else:
-            draw_face_bar(out, expanded)
-
-    def _draw_privacy_at_box(out, box: tuple[int, int, int, int]) -> None:
-        nonlocal avatar_count
-        avatar_count += 1
-        if mask_img is not None:
-            draw_mask_image(out, box, mask_img)
-        elif use_eye_rect:
-            draw_face_bar(out, box)
-        elif use_emoji and sprite is not None:
-            overlay_sprite(out, sprite, box, overlay_scale)
-        else:
-            draw_face_bar(out, box)
-
-    def _center_near(cx: float, cy: float, centers: list[tuple[float, float]], fw: int) -> bool:
-        thresh = fw * 0.12
-        return any((cx - mx) ** 2 + (cy - my) ** 2 < thresh ** 2 for mx, my in centers)
-
     def apply_privacy_mask(frame: np.ndarray) -> np.ndarray:
         nonlocal avatar_count, real_count
-        import cv2
-
         out = frame.copy()
         fh, fw = out.shape[:2]
-        rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
-        results = detector.process(rgb)
-        dets = results.detections or []
+        hits = detector.detect(out)
+        if demo_fallback and not hits:
+            hits = [FaceHit(bbox=demo_bbox(frame_idx, max(total_frames, 1), fw, fh), score=1.0)]
 
-        det_boxes = []
-        for det in dets:
-            fx, fy, fbw, fbh = bbox_from_detection(det, fw, fh)
-            det_boxes.append(privacy_gate.expand_box(fx, fy, fbw, fbh, fw, fh))
+        tracks = tracker.update(hits, fw, fh)
 
-        tracked_boxes = privacy_gate.update_tracks(det_boxes)
-        masked_centers: list[tuple[float, float]] = []
-
-        for det in dets:
-            fx, fy, fbw, fbh = bbox_from_detection(det, fw, fh)
-            _draw_privacy_at_detection(out, det, fw, fh)
-            masked_centers.append((fx + fbw / 2, fy + fbh / 2))
-
-        for box in tracked_boxes:
-            bx, by, bw, bh = box
-            cx, cy = bx + bw / 2, by + bh / 2
-            if _center_near(cx, cy, masked_centers, fw):
+        for tr in tracks:
+            fx, fy, fbw, fbh = pad_box(tr.smooth, bbox_pad, fw, fh)
+            sig = patch_from_bbox(out, *tr.smooth)
+            hit = match_consented_face(sig, consented_faces, threshold=match_threshold)
+            matched_name = (hit or {}).get("display_name") or ""
+            if hit and hit.get("user_id"):
+                presence_acc[hit["user_id"]] = presence_acc.get(hit["user_id"], 0.0) + frame_dt
+            if matched_name:
+                real_count += 1
+                draw_name_under_chin(out, fx, fy, fbw, fbh, matched_name)
                 continue
-            _draw_privacy_at_box(out, box)
-            masked_centers.append((cx, cy))
+
+            avatar_count += 1
+            kps = tr.smooth_kps if tr.smooth_kps is not None else tr.kps
+            if mask_img is not None:
+                draw_mask_image(out, (fx, fy, fbw, fbh), mask_img)
+            elif use_eye_rect:
+                draw_eye_privacy(out, (fx, fy, fbw, fbh), kps=kps, pad=bbox_pad)
+            elif use_emoji and sprite is not None:
+                overlay_sprite(out, sprite, (fx, fy, fbw, fbh), overlay_scale)
+            else:
+                draw_face_bar(out, (fx, fy, fbw, fbh))
 
         return out
 
@@ -419,6 +412,11 @@ def main() -> None:
             overlay_scale=args.overlay_scale,
             mask_image_path=args.mask_image,
             output_delay_ms=args.output_delay_ms,
+            detector_kind=args.detector,
+            tile=args.tile,
+            tile_grid=args.tile_grid,
+            det_size=args.det_size,
+            bbox_pad=args.bbox_pad,
         )
     )
 
