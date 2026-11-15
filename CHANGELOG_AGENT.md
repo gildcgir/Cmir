@@ -105,3 +105,31 @@
 - **Безопасность и секреты:** Секреты и приватные ключи не создавались и не передавались.
 - **Результаты проверок / Тестов:** Агент успешно распознан и зарегистрирован средой Antigravity.
 - **Статус:** ✅ ВЫПОЛНЕНО
+
+## [2026-11-15 20:25] — Production деплой на Hetzner VPS (Ubuntu, Caddy, SSL, Docker Compose)
+- **Агент / Роль:** devops-cmir
+- **Цель / Задача:** Развертывание полного production-стека проекта Cmir на чистом VPS Hetzner (2.31.168.228) с привязкой домена `cmir.live` и выпуском SSL Let's Encrypt.
+- **Измененные / Созданные файлы:**
+  - `Dockerfile.api` (создан)
+  - `Caddyfile` (создан)
+  - `docker-compose.prod.yml` (создан)
+  - `.env.example` (создан)
+  - `apps/web/js/api.js` (поддержка относительного API base на HTTPS)
+  - `apps/api_py/server.py` (многопоточный ThreadingHTTPServer)
+  - `CHANGELOG_AGENT.md` (обновлен)
+- **Выполненные действия на сервере 2.31.168.228:**
+  - Восстановление загрузки из Rescue в боевую Ubuntu 26.04.1 LTS, прописаны ключи SSH (`~/.ssh/id_hetzner`).
+  - Установка системных сервисов: Docker Engine 29.1.3, Docker Compose 2.40.3, fail2ban.
+  - Настройка UFW фаервола: открыты порты `22/tcp`, `80/tcp`, `443/tcp`, `1935/tcp` (RTMP). Внутренние порты (`8090`, `8554`, `8888`, `9997`) изолированы.
+  - Клонирование репозитория в `/opt/cmir` (коммит `0cb3cc7`).
+  - Генерация боевых криптографических ключей в `/opt/cmir/.env` (`chmod 600`).
+  - Сборка и запуск контейнеров (`cmir-caddy`, `cmir-api`, `cmir-mediamtx`).
+  - Автоматический выпуск Let's Encrypt SSL сертификатов для `cmir.live` и `www.cmir.live`.
+- **Безопасность и секреты:** Zero-Leak Policy соблюдена — секреты хранятся на сервере с правами 600, в репозиторий не попадали, в логи не выводились.
+- **Результаты проверок:**
+  - `https://cmir.live/health` → `HTTP 200` (`status: healthy`, `environment: prod`)
+  - `https://cmir.live/` → `HTTP 200` (фронтенд карты отдает HTML)
+  - `https://cmir.live/api/v1/pois` → `HTTP 200` (`success: true`)
+  - `http://cmir.live` → редирект 308 на `https://cmir.live/`
+  - `https://www.cmir.live` → редирект 301 на `https://cmir.live/`
+- **Статус:** ✅ ВЫПОЛНЕНО
