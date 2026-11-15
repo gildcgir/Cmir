@@ -40,6 +40,10 @@
           <input id="poiAddress" placeholder="Адрес" />
           <button type="button" class="secondary" id="btnGeocode" style="width:100%;margin-bottom:0.5rem">Найти по адресу</button>
           <textarea id="poiComment" placeholder="Комментарий"></textarea>
+          <label class="check-row" for="poiClosed">
+            <input type="checkbox" id="poiClosed" />
+            Закрытое мероприятие
+          </label>
           <input id="poiLat" placeholder="Широта" />
           <input id="poiLng" placeholder="Долгота" />
           <div class="row-btns">
@@ -150,6 +154,10 @@
         <input id="dlgPoiName" placeholder="Наименование" required />
         <input id="dlgPoiAddress" placeholder="Адрес" />
         <textarea id="dlgPoiComment" placeholder="Комментарий"></textarea>
+        <label class="check-row" for="dlgPoiClosed">
+          <input type="checkbox" id="dlgPoiClosed" />
+          Закрытое мероприятие
+        </label>
         <input type="hidden" id="dlgPoiLat" />
         <input type="hidden" id="dlgPoiLng" />
         <div class="modal-actions">

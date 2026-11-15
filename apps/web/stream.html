@@ -24,6 +24,17 @@
       color: #fff; font: 600 1rem system-ui, sans-serif;
       text-shadow: 0 1px 4px #000; z-index: 2;
     }
+    .access {
+      display: inline-block;
+      margin-left: 8px;
+      font-size: .72rem;
+      font-weight: 700;
+      padding: .15rem .45rem;
+      border-radius: 999px;
+      vertical-align: middle;
+    }
+    .access.open { background: rgba(31,107,69,.85); }
+    .access.closed { background: rgba(138,47,47,.9); }
     .status {
       position: fixed; bottom: max(12px, env(safe-area-inset-bottom)); left: 16px; right: 16px;
       color: #ccc; font: 0.85rem system-ui, sans-serif;
@@ -46,7 +57,7 @@
     <canvas id="mask"></canvas>
   </div>
   <script type="module">
-    import { LiveCameraView } from "./js/live-camera.js?v=camfix9";
+    import { LiveCameraView } from "./js/live-camera.js?v=camfix12";
 
     const API = localStorage.getItem("cmir_api") || (
       (location.hostname === "localhost" || location.hostname === "127.0.0.1")
@@ -61,7 +72,15 @@
     const clientId = p.get("client") || sessionStorage.getItem("cmir_client_id") || "fullscreen";
     const name = p.get("name") || "Live";
     const maskPath = p.get("mask") || "";
-    document.getElementById("title").textContent = name;
+    const access = p.get("access") === "closed" ? "closed" : "open";
+    const accessLabel = access === "closed" ? "закрытое" : "открытое";
+    const titleEl = document.getElementById("title");
+    titleEl.textContent = "";
+    titleEl.append(document.createTextNode(name + " "));
+    const badge = document.createElement("span");
+    badge.className = "access " + access;
+    badge.textContent = accessLabel;
+    titleEl.append(badge);
     document.getElementById("btnBack").onclick = () => {
       if (history.length > 1) history.back();
       else location.href = "./";

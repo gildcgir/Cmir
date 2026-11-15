@@ -50,7 +50,7 @@ def main() -> int:
         checks.append((f"camera_{name}", cam["data"]["view_mode"] == mode))
 
     cam_id = cam["data"]["id"]
-    health = api_call(API, "GET", f"/api/v1/cameras/{cam_id}/health")
+    health = api_call(API, "GET", f"/api/v1/cameras/{cam_id}/health", token=admin_token)
     checks.append(("camera_health", "status" in health["data"]))
 
     patched = api_call(

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0a0e14" />
   <title>Cmir — карта мест</title>
   <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-  <link rel="stylesheet" href="css/app.css?v=map-chat3" />
+  <link rel="stylesheet" href="css/app.css?v=map-events1" />
   <script src="vendor/hls/hls.min.js" defer></script>
   <script src="vendor/leaflet/leaflet.js" defer></script>
 </head>
@@ -21,6 +21,7 @@
       <button type="button" class="close-panel" id="closePanel" aria-label="Закрыть">×</button>
       <div class="poi-panel-meta">
         <h2 id="panelTitle">Место</h2>
+        <p class="event-badge" id="panelAccess"></p>
         <p class="addr" id="panelAddr"></p>
         <p class="comment" id="panelComment"></p>
       </div>
@@ -32,9 +33,13 @@
         <p class="addr" id="panelPreviewStatus"></p>
         <div class="panel-actions">
           <button type="button" class="primary" id="btnFullscreen">Трансляция на весь экран</button>
+          <button type="button" class="secondary" id="btnGuestStream" hidden>Начать свою трансляцию</button>
+          <button type="button" class="secondary" id="btnVisitRequest" hidden>Запрос на посещение</button>
           <button type="button" class="secondary" id="btnEndBroadcast" hidden>Завершить трансляцию</button>
           <button type="button" class="secondary" id="btnToggleChat" aria-expanded="false">Чат места</button>
         </div>
+        <div id="guestStreamsList" class="guest-streams" hidden></div>
+        <div id="hostVisitRequests" class="host-requests" hidden></div>
         <div class="poi-chat" id="poiChat" hidden>
           <div class="poi-chat-log" id="poiChatLog" aria-live="polite"></div>
           <form class="poi-chat-form" id="poiChatForm">
@@ -61,6 +66,10 @@
           <option value="user">Фронтальная (селфи)</option>
           <option value="environment">Задняя</option>
         </select>
+        <label class="check-row" for="addPlaceClosed">
+          <input type="checkbox" id="addPlaceClosed" />
+          Закрытое мероприятие (вход по аппруву владельца)
+        </label>
         <input type="hidden" id="addPlaceLat" />
         <input type="hidden" id="addPlaceLng" />
         <p class="hint" id="addPlaceCoords"></p>
@@ -85,13 +94,11 @@
         <input name="password" type="password" placeholder="Пароль" required autocomplete="current-password" />
         <button type="submit" class="primary" style="width:100%">Войти</button>
       </form>
-      <form id="formRegister" style="display:none">
-        <input name="name" placeholder="Имя" />
-        <input name="email" type="email" placeholder="Email" required />
-        <input name="password" type="password" placeholder="Пароль (мин. 8)" required minlength="8" />
-        <button type="submit" class="primary" style="width:100%">Зарегистрироваться</button>
-      </form>
-      <p class="hint">После киоска согласия вход — по телефону и выданному паролю.</p>
+      <div id="formRegister" style="display:none">
+        <p class="hint">Новый аккаунт создаётся только в киоске согласия: ФИО, телефон, документы и ракурсы лица — на одной форме.</p>
+        <a class="primary kiosk-cta" href="kiosk/index.html?v=enroll7">Перейти в киоск регистрации</a>
+      </div>
+      <p class="hint">После киоска согласия вход — по телефону, email и паролю с формы регистрации.</p>
       <p class="msg" id="authMsg"></p>
       <nav class="account-extra-links" aria-label="Дополнительно">
         <a href="performance.html" id="performanceLinkGuest">Перфоманс</a>
@@ -122,6 +129,15 @@
         <button type="submit" class="primary" style="width:100%;margin-top:0.75rem">Сохранить профиль</button>
         <p class="msg" id="profileMsg"></p>
       </form>
+      <div id="notificationsSection" class="profile-form">
+        <h3 style="margin-top:1rem;font-size:1rem">Уведомления</h3>
+        <div id="notificationsList"></div>
+      </div>
+      <div id="visitHistorySection" class="profile-form">
+        <h3 style="margin-top:1rem;font-size:1rem">История проходов</h3>
+        <p class="hint">Коды входа видны только вам.</p>
+        <div id="visitHistoryList"></div>
+      </div>
       <div class="profile-form" id="platformsSection">
         <h3 style="margin-top:1rem;font-size:1rem">Платформы</h3>
         <p class="hint">Привяжите никнеймы YouTube, Twitch, Instagram, TikTok</p>
@@ -147,11 +163,59 @@
     </div>
   </section>
 
+  <div class="modal-backdrop" id="needKioskModal">
+    <div class="modal" role="dialog">
+      <h2>Нужна регистрация</h2>
+      <p class="hint">Новый пользователь регистрируется только в киоске согласия. Там же собираются ФИО, контакты, документы и ракурсы лица.</p>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-close-modal="needKioskModal">Закрыть</button>
+        <a class="primary kiosk-cta" href="kiosk/index.html?v=enroll7">Перейти в киоск</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="visitRequestModal">
+    <div class="modal modal-wide" role="dialog">
+      <h2>Запрос на посещение</h2>
+      <p class="warn-note" id="visitWarningText">Владелец мероприятия оставляет за собой право отказать во входе, если вы будете в плохой кондиции.</p>
+      <label class="check-row">
+        <input type="checkbox" id="visitWarningAccept" />
+        Я понимаю и принимаю это условие
+      </label>
+      <p class="hint">Снимите актуальное селфи — так вы собираетесь прийти.</p>
+      <div class="selfie-stage">
+        <video id="visitSelfieVideo" autoplay playsinline muted></video>
+        <img id="visitSelfiePreview" alt="" hidden />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="btnCaptureSelfie">Сделать селфи</button>
+        <button type="button" class="secondary" id="btnRetakeSelfie" hidden>Переснять</button>
+      </div>
+      <p class="msg" id="visitRequestMsg"></p>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-close-modal="visitRequestModal">Отмена</button>
+        <button type="button" class="primary" id="btnSendVisitRequest">Отправить запрос</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="publicProfileModal">
+    <div class="modal" role="dialog">
+      <h2>Профиль</h2>
+      <div id="publicProfileBody"></div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" data-close-modal="publicProfileModal">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
   <nav class="bottomnav" aria-label="Основная навигация">
     <button type="button" class="tab-btn active" data-view="map" id="tabMap">
       <span class="tab-label">Карта</span>
     </button>
-    <a class="tab-btn tab-link" href="kiosk/index.html?v=enroll6" id="tabKiosk">
+    <a class="tab-btn tab-link" href="kiosk/index.html?v=enroll7" id="tabKiosk">
       <span class="tab-label">Киоск</span>
     </a>
     <button type="button" class="tab-btn" data-view="account" id="tabAccount">
@@ -191,7 +255,7 @@
 
     try {
       await waitForLeaflet();
-      const { initUser } = await import("./js/user.js?v=camfix10");
+      const { initUser } = await import("./js/user.js?v=camfix12");
       await initUser();
       if (location.hash === "#account") {
         document.getElementById("tabAccount")?.click();

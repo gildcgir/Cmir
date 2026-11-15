@@ -211,6 +211,21 @@ def test_face_match_and_force_release_auth(api_server):
         ),
         timeout=5,
     ) as resp:
+        anon = json.loads(resp.read().decode())["data"]
+    assert anon["matched"] is True
+    assert "user_id" not in anon
+    assert "display_name" not in anon
+
+    token = (reg.get("auth") or {}).get("token") or ""
+    with urllib.request.urlopen(
+        urllib.request.Request(
+            f"{api_server}/api/v1/face-match",
+            data=match_body,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            method="POST",
+        ),
+        timeout=5,
+    ) as resp:
         hit = json.loads(resp.read().decode())["data"]
     assert hit["matched"] is True
     assert hit["user_id"] == reg["user_id"]

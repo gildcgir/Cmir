@@ -66,7 +66,7 @@ def test_index_preview_elements(web_root: Path):
     html = (web_root / "index.html").read_text(encoding="utf-8")
     for el_id in (
         "previewVideo", "previewMaskCanvas", "map", "mapView", "poiPanel",
-        "consentsList", "consentsSection", "kioskLink",
+        "consentsList", "consentsSection", "tabKiosk",
     ):
         assert f'id="{el_id}"' in html, f"index.html missing #{el_id}"
     assert "Email или телефон" in html
@@ -111,7 +111,7 @@ def test_kiosk_locks_after_registration(web_root: Path):
         "getLastFaceSignature",
         "getToken",
         "kioskLocked",
-        "wireLiveView",
+        "startMaskedPageCamera",
         "panelRegister",
         "face_embeddings",
         "PoseEnrollment",
@@ -146,16 +146,20 @@ def test_use_cases_doc_exists(web_root: Path):
 def test_live_camera_privacy_before_display(web_root: Path):
     js = (web_root / "js" / "live-camera.js").read_text(encoding="utf-8")
     assert "firstDetectDone" in js
-    block = js[js.find("drawFrame(ts)") : js.find("function matchFaceTrack")]
-    assert "if (this.compositeMode && !this.firstDetectDone) return" in block
-    assert "this.ctx.drawImage(video" in block
+    assert "using blur fallback" in js
+    assert "this.stream = stream" in js
+    assert "await this.init()" in js
+    # Camera is attached before MediaPipe; raw faces stay hidden (blur or black).
+    assert 'this.ctx.filter = "blur(28px)"' in js
+    assert "if (this.compositeMode && !this.firstDetectDone)" in js
+    assert "this.ctx.drawImage(video" in js
 
 
 def test_live_camera_face_filter(web_root: Path):
     js = (web_root / "js" / "live-camera.js").read_text(encoding="utf-8")
     assert "export function isLikelyFaceDetection" in js
     assert "compositeMode" in js
-    assert "MIN_MASK_CONFIRM_FRAMES" in js
+    assert "TRACK_CONFIRM_TO_SHOW" in js
     assert "blendSignature" in js
     block = js[js.find("drawFrame(ts)") : js.find("function matchFaceTrack")]
     assert "if (ts - this.lastTs < 33) return" not in block

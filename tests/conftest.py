@@ -53,10 +53,10 @@ def api_server():
 
     import server as api_server_mod
 
-    os.environ.setdefault("CMIR_ENV", "test")
-    os.environ.setdefault("CMIR_WORKER_TOKEN", "test-worker-token")
-    os.environ.setdefault("CMIR_DATA_KEY", "test-data-key-not-for-prod-use!!")
-    os.environ.setdefault("CMIR_ADMIN_PASSWORD", "admin")
+    os.environ["CMIR_ENV"] = "test"
+    os.environ["CMIR_WORKER_TOKEN"] = "test-worker-token"
+    os.environ["CMIR_DATA_KEY"] = "test-data-key-not-for-prod-use!!"
+    os.environ["CMIR_ADMIN_PASSWORD"] = "admin"
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     os.environ["CMIR_DB_PATH"] = path

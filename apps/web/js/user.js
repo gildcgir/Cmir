@@ -9,10 +9,91 @@ let phonePreviewStream = null;
 /** Invalidates in-flight startPoiPreview after close / tab hide. */
 let previewEpoch = 0;
 
-const ASSET_V = "camfix10";
+const ASSET_V = "camfix12";
 let hostRecorder = null;
 let hostRecordChunks = [];
 const HOST_RECORD_MAX_MS = 5 * 60 * 1000;
+
+let lastAuthUser = null;
+let myLiveGuestStreamId = "";
+let visitSelfieStream = null;
+let visitSelfieDataUrl = "";
+
+function escapeHtml(s) {
+  return String(s || "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[c]));
+}
+
+function isKioskRegistered(u = lastAuthUser) {
+  return !!(u && u.kiosk_registered);
+}
+
+function openModal(id) {
+  document.getElementById(id)?.classList.add("open");
+}
+
+function closeModal(id) {
+  document.getElementById(id)?.classList.remove("open");
+}
+
+function showToast(msg, ms = 5000) {
+  const el = document.getElementById("toast");
+  if (!el || !msg) return;
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => { el.hidden = true; }, ms);
+}
+
+function promptKioskRegister() {
+  openModal("needKioskModal");
+}
+
+function requireKioskOrPrompt() {
+  if (!getToken() || !isKioskRegistered()) {
+    promptKioskRegister();
+    return false;
+  }
+  return true;
+}
+
+function eventAccessLabel(poi) {
+  return poi?.is_closed ? "Закрытое мероприятие" : "Открытое мероприятие";
+}
+
+function poiMarkerIcon(poi) {
+  const closed = !!poi?.is_closed;
+  const cls = closed ? "poi-pin poi-pin--closed" : "poi-pin poi-pin--open";
+  const badge = closed ? "закрытое" : "открытое";
+  return globalThis.L.divIcon({
+    className: "poi-pin-wrap",
+    html: `<div class="${cls}"><span>${escapeHtml(poi.name)}</span><small>${badge}</small></div>`,
+    iconSize: [120, 36],
+    iconAnchor: [60, 36],
+  });
+}
+
+function getCurrentPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("Геолокация недоступна на этом устройстве"));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude,
+      }),
+      (err) => reject(new Error(err.message || "Не удалось определить местоположение")),
+      { enableHighAccuracy: true, timeout: 18000, maximumAge: 8000 },
+    );
+  });
+}
 
 function currentUserId() {
   try {
@@ -32,6 +113,271 @@ function updateHostBroadcastUi(poi) {
   if (!btn) return;
   const show = !!(poi && isPlaceOwner(poi) && poi.status !== "lingering" && poi.status !== "pending");
   btn.hidden = !show;
+}
+
+function updateEventActionsUi(poi) {
+  const access = document.getElementById("panelAccess");
+  if (access) {
+    access.textContent = eventAccessLabel(poi);
+    access.className = "event-badge " + (poi?.is_closed ? "closed" : "open");
+  }
+  const guestBtn = document.getElementById("btnGuestStream");
+  const visitBtn = document.getElementById("btnVisitRequest");
+  const live = poi && poi.status !== "lingering" && poi.status !== "pending";
+  const closed = !!poi?.is_closed;
+  if (guestBtn) {
+    const mine = (poi?.guest_streams || []).find((s) => s.user_id === currentUserId() && s.status === "live");
+    myLiveGuestStreamId = mine?.id || "";
+    guestBtn.hidden = !(live && !closed);
+    guestBtn.textContent = mine ? "Остановить свою трансляцию" : "Начать свою трансляцию";
+  }
+  if (visitBtn) visitBtn.hidden = !(live && closed);
+  renderGuestStreams(poi);
+  if (poi && closed && isPlaceOwner(poi)) loadHostVisitRequests(poi.id);
+  else {
+    const box = document.getElementById("hostVisitRequests");
+    if (box) {
+      box.hidden = true;
+      box.innerHTML = "";
+    }
+  }
+}
+
+function renderGuestStreams(poi) {
+  const box = document.getElementById("guestStreamsList");
+  if (!box) return;
+  const rows = poi?.is_closed ? [] : (poi?.guest_streams || []);
+  if (!rows.length) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = `<p class="hint">Доп. эфиры с места (${rows.length})</p>`
+    + rows.map((s) => `<p class="hint">● ${escapeHtml(s.display_name || "гость")} · live</p>`).join("");
+}
+
+async function loadHostVisitRequests(poiId) {
+  const box = document.getElementById("hostVisitRequests");
+  if (!box || !getToken()) return;
+  try {
+    const rows = (await api("GET", `/api/v1/pois/${poiId}/visit-requests`)).data || [];
+    box.hidden = false;
+    if (!rows.length) {
+      box.innerHTML = "<p class='hint'>Запросов на вход пока нет.</p>";
+      return;
+    }
+    box.innerHTML = "<p class='hint'>Запросы на вход</p>" + rows.map((r) => {
+      const st = r.status === "approved"
+        ? `одобрен · <span class="pass-code">${escapeHtml(r.pass_code || "")}</span>`
+        : (r.status === "rejected" ? "отклонён" : "ожидает");
+      const selfie = r.selfie_url ? `${API}${r.selfie_url}` : "";
+      const actions = r.status === "pending"
+        ? `<button type="button" class="primary" data-approve="${r.id}">Одобрить</button>
+           <button type="button" class="secondary" data-reject="${r.id}">Отказать</button>`
+        : "";
+      return `<div class="host-request-card">
+        ${selfie ? `<img src="${selfie}" alt="селфи" />` : "<div></div>"}
+        <div>
+          <p><a href="#" data-profile="${r.user_id}">${escapeHtml(r.profile?.full_name || r.profile?.display_name || "гость")}</a></p>
+          <p class="hint">${st}</p>
+          <div class="modal-actions">${actions}</div>
+        </div>
+      </div>`;
+    }).join("");
+    box.querySelectorAll("[data-approve]").forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          await api("POST", `/api/v1/visit-requests/${btn.dataset.approve}/approve`, {});
+          await loadHostVisitRequests(poiId);
+        } catch (e) { alert(e.message); }
+      };
+    });
+    box.querySelectorAll("[data-reject]").forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          await api("POST", `/api/v1/visit-requests/${btn.dataset.reject}/reject`, {});
+          await loadHostVisitRequests(poiId);
+        } catch (e) { alert(e.message); }
+      };
+    });
+    box.querySelectorAll("[data-profile]").forEach((a) => {
+      a.onclick = async (ev) => {
+        ev.preventDefault();
+        try {
+          const card = (await api("GET", `/api/v1/users/${a.dataset.profile}`)).data;
+          const body = document.getElementById("publicProfileBody");
+          if (body) {
+            body.innerHTML = `
+              <p><strong>${escapeHtml(card.display_name || "")}</strong></p>
+              <p class="hint">ФИО: ${escapeHtml(card.full_name || "—")}</p>
+              <p class="hint">UT: ${Number(card.balance_ut || 0).toFixed(2)}</p>
+            `;
+          }
+          openModal("publicProfileModal");
+        } catch (e) { alert(e.message); }
+      };
+    });
+  } catch (_) {
+    box.hidden = true;
+  }
+}
+
+async function startOrStopGuestStream() {
+  if (!selectedPoi) return;
+  if (!requireKioskOrPrompt()) return;
+  const btn = document.getElementById("btnGuestStream");
+  try {
+    if (myLiveGuestStreamId) {
+      await api("POST", `/api/v1/pois/${selectedPoi.id}/guest-streams/stop`, {
+        stream_id: myLiveGuestStreamId,
+      });
+      myLiveGuestStreamId = "";
+      showToast("Ваша дополнительная трансляция остановлена");
+    } else {
+      setPreviewStatus("Проверка геолокации…");
+      const pos = await getCurrentPosition();
+      await api("POST", `/api/v1/pois/${selectedPoi.id}/guest-streams`, {
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        facing_mode: selectedPoi.facing_mode || "user",
+      });
+      showToast("Дополнительная трансляция с этого места запущена");
+    }
+    await loadPois();
+    const fresh = pois.find((p) => p.id === selectedPoi.id) || selectedPoi;
+    selectedPoi = fresh;
+    updateEventActionsUi(fresh);
+    setPreviewStatus("");
+  } catch (e) {
+    if (e.code === "kiosk_required") promptKioskRegister();
+    else setPreviewStatus(e.message || "Не удалось запустить трансляцию");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function stopVisitSelfieCamera() {
+  visitSelfieStream?.getTracks?.().forEach((t) => t.stop());
+  visitSelfieStream = null;
+  const video = document.getElementById("visitSelfieVideo");
+  if (video) video.srcObject = null;
+}
+
+async function startVisitSelfieCamera() {
+  stopVisitSelfieCamera();
+  visitSelfieDataUrl = "";
+  const video = document.getElementById("visitSelfieVideo");
+  const img = document.getElementById("visitSelfiePreview");
+  if (img) img.hidden = true;
+  if (video) video.hidden = false;
+  visitSelfieStream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "user" },
+    audio: false,
+  });
+  if (video) {
+    video.srcObject = visitSelfieStream;
+    await video.play().catch(() => {});
+  }
+}
+
+function captureVisitSelfie() {
+  const video = document.getElementById("visitSelfieVideo");
+  if (!video || video.videoWidth < 8) throw new Error("Камера ещё не готова");
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  visitSelfieDataUrl = canvas.toDataURL("image/jpeg", 0.85);
+  const img = document.getElementById("visitSelfiePreview");
+  if (img) {
+    img.src = visitSelfieDataUrl;
+    img.hidden = false;
+  }
+  video.hidden = true;
+  stopVisitSelfieCamera();
+}
+
+async function openVisitRequestModal() {
+  if (!selectedPoi) return;
+  if (!requireKioskOrPrompt()) return;
+  document.getElementById("visitWarningAccept").checked = false;
+  document.getElementById("visitRequestMsg").textContent = "";
+  document.getElementById("btnRetakeSelfie").hidden = true;
+  document.getElementById("btnCaptureSelfie").hidden = false;
+  openModal("visitRequestModal");
+  try {
+    await startVisitSelfieCamera();
+  } catch (e) {
+    document.getElementById("visitRequestMsg").textContent = e.message || "Камера недоступна";
+  }
+}
+
+async function sendVisitRequest() {
+  if (!selectedPoi) return;
+  const msg = document.getElementById("visitRequestMsg");
+  if (!document.getElementById("visitWarningAccept")?.checked) {
+    if (msg) msg.textContent = "Нужно принять условие владельца";
+    return;
+  }
+  if (!visitSelfieDataUrl) {
+    if (msg) msg.textContent = "Сначала сделайте селфи";
+    return;
+  }
+  try {
+    await api("POST", `/api/v1/pois/${selectedPoi.id}/visit-requests`, {
+      warning_accepted: true,
+      selfie: visitSelfieDataUrl,
+    });
+    closeModal("visitRequestModal");
+    stopVisitSelfieCamera();
+    showToast("Запрос отправлен. Владелец мероприятия оставляет за собой право отказать во входе, если вы будете в плохой кондиции.");
+  } catch (e) {
+    if (e.code === "kiosk_required") {
+      closeModal("visitRequestModal");
+      promptKioskRegister();
+      return;
+    }
+    if (msg) msg.textContent = e.message || "Не удалось отправить";
+  }
+}
+
+async function loadVisitHistory() {
+  const box = document.getElementById("visitHistoryList");
+  if (!box || !getToken()) return;
+  try {
+    const rows = (await api("GET", "/api/v1/auth/visit-passes")).data || [];
+    box.innerHTML = rows.length
+      ? rows.map((r) => `
+          <p class="hint">${escapeHtml(r.poi_name || "")} ·
+            <span class="pass-code">${escapeHtml(r.pass_code || "")}</span> ·
+            ${escapeHtml((r.created_at || "").slice(0, 16))}</p>
+        `).join("")
+      : "<p class='hint'>Пока нет одобренных проходов.</p>";
+  } catch (_) {
+    box.innerHTML = "";
+  }
+}
+
+async function loadNotifications() {
+  const box = document.getElementById("notificationsList");
+  if (!box || !getToken()) return;
+  try {
+    const rows = (await api("GET", "/api/v1/auth/notifications")).data || [];
+    if (!rows.length) {
+      box.innerHTML = "<p class='hint'>Нет уведомлений.</p>";
+      return;
+    }
+    box.innerHTML = rows.map((n) => `
+      <p class="hint">${escapeHtml(n.title || "")}: ${escapeHtml(n.body || "")}</p>
+    `).join("");
+    const unread = rows.find((n) => !n.read_at && n.kind === "visit_approved" && n.payload?.pass_code);
+    if (unread?.payload?.pass_code) {
+      showToast(`${unread.title}: ${unread.payload.pass_code}`);
+    }
+  } catch (_) {
+    box.innerHTML = "";
+  }
 }
 
 function stopHostRecorder() {
@@ -254,9 +600,9 @@ async function loadPois() {
       const lat = Number(poi.latitude);
       const lon = Number(poi.longitude);
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-      const m = globalThis.L.marker([lat, lon])
+      const m = globalThis.L.marker([lat, lon], { icon: poiMarkerIcon(poi) })
         .addTo(map)
-        .bindTooltip(poi.name, { permanent: false })
+        .bindTooltip(`${poi.name} · ${eventAccessLabel(poi)}`, { permanent: false })
         .on("click", () => openPoiPanel(poi));
       markers.push(m);
     });
@@ -368,6 +714,7 @@ function stopPreview() {
     v.removeAttribute("src");
     v.srcObject = null;
     v.classList.add("live-source-hidden");
+    v.style.filter = "";
     v.loop = false;
     v.load();
   }
@@ -434,12 +781,46 @@ async function tryDeviceCameraFallback(poi = null, cam = null, epoch = previewEp
     previewAttempt = 0;
     return !!liveView;
   } catch (e) {
-    console.error("device camera fallback failed:", e);
+    console.error("device camera fallback failed:", e?.name || e, e?.message || "");
     liveView?.stop();
     liveView = null;
+    if (await startRawPhonePreview(facingFromPoiCam(poi, cam), poi, epoch)) return true;
     if (previewStillWanted(poi, epoch)) {
       setPreviewStatus(`Камера/маски недоступны: ${e.message || e}`);
     }
+    return false;
+  }
+}
+
+/** Last-resort: show the phone camera even if MediaPipe/module fails. */
+async function startRawPhonePreview(facingMode, poi, epoch) {
+  const video = els.previewVideo();
+  if (!video || !navigator.mediaDevices?.getUserMedia) return false;
+  if (!previewStillWanted(poi, epoch)) return false;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facingMode === "environment" ? "environment" : "user" },
+      audio: false,
+    });
+    if (!previewStillWanted(poi, epoch)) {
+      stream.getTracks().forEach((t) => t.stop());
+      return false;
+    }
+    if (phonePreviewStream) {
+      phonePreviewStream.getTracks().forEach((t) => t.stop());
+    }
+    phonePreviewStream = stream;
+    video.srcObject = stream;
+    video.muted = true;
+    video.setAttribute("playsinline", "true");
+    video.classList.remove("live-source-hidden");
+    video.style.filter = "blur(20px)";
+    await video.play().catch(() => {});
+    setPreviewStatus("Камера устройства (упрощённый режим)");
+    previewAttempt = 0;
+    return true;
+  } catch (e) {
+    console.error("raw phone preview failed:", e?.name || e, e?.message || "");
     return false;
   }
 }
@@ -643,7 +1024,7 @@ async function startPoiPreview(poi, fromRetry = false) {
 
   // Don't touch getUserMedia for RTSP/HLS cams until fallback — avoids spurious permission prompts
   let deviceId = "";
-  if (looksLocal) {
+  if (looksLocal && !isCmirAndroid()) {
     const mod = await ensureLiveCamera();
     if (!previewStillWanted(poi, epoch)) return;
     deviceId = await mod.resolveUsbDeviceIdAsync(cam, usbFallbackCams(poi, cam));
@@ -800,6 +1181,7 @@ async function openPoiPanel(poi) {
   els.panelAddr().textContent = poi.address || `${poi.city || ""} ${poi.country || ""}`.trim() || "—";
   els.panelComment().textContent = poi.comment || poi.description || "";
   updateHostBroadcastUi(poi);
+  updateEventActionsUi(poi);
   setTimeout(() => map?.invalidateSize(), 50);
   await startPoiPreview(poi);
   // Prefetch chat in background; UI stays collapsed until user opens it
@@ -939,6 +1321,7 @@ async function openFullscreenStream() {
   u.searchParams.set("name", selectedPoi.name);
   u.searchParams.set("client", getClientId());
   u.searchParams.set("facing", facingFromPoiCam(selectedPoi, cam));
+  u.searchParams.set("access", selectedPoi.is_closed ? "closed" : "open");
   if (selectedPoi.mask_image_url) {
     u.searchParams.set("mask", selectedPoi.mask_image_url);
   }
@@ -1010,9 +1393,11 @@ async function fillProfileForm(u) {
   const poiId = u.consents?.[0]?.poi_id;
   await loadProfileMenu(poiId);
   if (menu && prof.favorite_menu_item) menu.value = prof.favorite_menu_item;
-  await loadPlatformLinks();
+    await loadPlatformLinks();
   renderConsents(u);
   await loadAirtime();
+  await loadVisitHistory();
+  await loadNotifications();
 }
 
 async function loadAirtime() {
@@ -1074,6 +1459,7 @@ async function refreshAuth() {
   const token = getToken();
   const tabAccount = document.getElementById("tabAccount");
   if (!token) {
+    lastAuthUser = null;
     els.authGuest().style.display = "block";
     els.authUser().style.display = "none";
     els.adminLink().style.display = "none";
@@ -1084,6 +1470,8 @@ async function refreshAuth() {
   try {
     const me = await api("GET", "/api/v1/auth/me");
     const u = me.data;
+    lastAuthUser = u;
+    if (u.id) localStorage.setItem("cmir_user", JSON.stringify(u));
     if (u.role === "admin") {
       els.authGuest().style.display = "none";
       els.authUser().style.display = "block";
@@ -1120,6 +1508,48 @@ function bindEvents() {
   document.getElementById("closePanel")?.addEventListener("click", () => closePoiPanel());
 
   document.getElementById("btnFullscreen")?.addEventListener("click", openFullscreenStream);
+  document.getElementById("btnGuestStream")?.addEventListener("click", () => {
+    startOrStopGuestStream().catch(() => {});
+  });
+  document.getElementById("btnVisitRequest")?.addEventListener("click", () => {
+    openVisitRequestModal().catch(() => {});
+  });
+  document.getElementById("btnCaptureSelfie")?.addEventListener("click", () => {
+    try {
+      captureVisitSelfie();
+      document.getElementById("btnCaptureSelfie").hidden = true;
+      document.getElementById("btnRetakeSelfie").hidden = false;
+    } catch (e) {
+      const msg = document.getElementById("visitRequestMsg");
+      if (msg) msg.textContent = e.message || "Не удалось снять селфи";
+    }
+  });
+  document.getElementById("btnRetakeSelfie")?.addEventListener("click", () => {
+    document.getElementById("btnCaptureSelfie").hidden = false;
+    document.getElementById("btnRetakeSelfie").hidden = true;
+    startVisitSelfieCamera().catch((e) => {
+      const msg = document.getElementById("visitRequestMsg");
+      if (msg) msg.textContent = e.message || "Камера недоступна";
+    });
+  });
+  document.getElementById("btnSendVisitRequest")?.addEventListener("click", () => {
+    sendVisitRequest().catch(() => {});
+  });
+  document.querySelectorAll("[data-close-modal]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      closeModal(btn.dataset.closeModal);
+      if (btn.dataset.closeModal === "visitRequestModal") stopVisitSelfieCamera();
+    });
+  });
+  document.getElementById("visitRequestModal")?.addEventListener("click", (e) => {
+    if (e.target.id === "visitRequestModal") {
+      closeModal("visitRequestModal");
+      stopVisitSelfieCamera();
+    }
+  });
+  document.getElementById("needKioskModal")?.addEventListener("click", (e) => {
+    if (e.target.id === "needKioskModal") closeModal("needKioskModal");
+  });
   document.getElementById("btnEndBroadcast")?.addEventListener("click", () => {
     if (!selectedPoi) return;
     if (!confirm("Завершить трансляцию? Точка останется на карте ~30 минут с записью последних минут, затем удалится.")) {
@@ -1181,6 +1611,7 @@ function bindEvents() {
         latitude: Number(document.getElementById("addPlaceLat")?.value),
         longitude: Number(document.getElementById("addPlaceLng")?.value),
         facing_mode: document.getElementById("addPlaceFacing")?.value || "user",
+        is_closed: !!document.getElementById("addPlaceClosed")?.checked,
       });
       if (msg) msg.textContent = "Заявка отправлена. Ждите аппрува администратора.";
       setTimeout(() => {
@@ -1266,23 +1697,6 @@ function bindEvents() {
       if (r.data.user?.role === "admin") {
         els.adminLink().style.display = "block";
       }
-    } catch (err) {
-      els.authMsg().textContent = err.message;
-      els.authMsg().className = "msg error";
-    }
-  });
-
-  document.getElementById("formRegister").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    try {
-      await api("POST", "/api/v1/auth/register", {
-        email: fd.get("email"),
-        password: fd.get("password"),
-        display_name: fd.get("name"),
-      });
-      els.authMsg().textContent = "Регистрация OK — войдите";
-      els.authMsg().className = "msg ok";
     } catch (err) {
       els.authMsg().textContent = err.message;
       els.authMsg().className = "msg error";

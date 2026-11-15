@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
 from typing import Optional
 
 import numpy as np
@@ -10,6 +11,18 @@ import numpy as np
 
 def _ffmpeg() -> str:
     return shutil.which("ffmpeg") or "/usr/local/bin/ffmpeg"
+
+
+def _drain_pipe(pipe) -> None:
+    try:
+        if not pipe:
+            return
+        while True:
+            chunk = pipe.read(4096)
+            if not chunk:
+                break
+    except Exception:
+        pass
 
 
 class FfmpegRtmpWriter:
@@ -52,6 +65,7 @@ class FfmpegRtmpWriter:
             stdin=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        threading.Thread(target=_drain_pipe, args=(self._proc.stderr,), daemon=True).start()
 
     def write(self, frame: np.ndarray) -> bool:
         if self._proc is None or self._proc.stdin is None:

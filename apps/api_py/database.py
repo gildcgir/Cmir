@@ -11,7 +11,13 @@ DEFAULT_DB = Path(__file__).resolve().parent / "data" / "cmir_test.db"
 
 
 def app_env() -> str:
-    return os.environ.get("CMIR_ENV", "test").lower()
+    raw = os.environ.get("CMIR_ENV", "").strip().lower()
+    if raw in ("prod", "production"):
+        return "prod"
+    if raw in ("test", "dev", "development"):
+        return "test"
+    # Unset/unknown: fail-closed so prod secret gates apply.
+    return "prod"
 
 
 def db_path() -> Path:
@@ -363,6 +369,57 @@ CREATE TABLE IF NOT EXISTS poi_chat_mutes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_poi_created ON poi_chat_messages(poi_id, created_at);
+
+CREATE TABLE IF NOT EXISTS poi_guest_streams (
+    id TEXT PRIMARY KEY,
+    poi_id TEXT NOT NULL REFERENCES pois(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    camera_id TEXT,
+    status TEXT NOT NULL DEFAULT 'live',
+    latitude REAL,
+    longitude REAL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_guest_streams_poi ON poi_guest_streams(poi_id, status);
+CREATE INDEX IF NOT EXISTS idx_guest_streams_user ON poi_guest_streams(user_id, status);
+
+CREATE TABLE IF NOT EXISTS visit_requests (
+    id TEXT PRIMARY KEY,
+    poi_id TEXT NOT NULL REFERENCES pois(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    selfie_path TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    pass_code TEXT,
+    warning_accepted INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    decided_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_visit_requests_poi ON visit_requests(poi_id, status);
+CREATE INDEX IF NOT EXISTS idx_visit_requests_user ON visit_requests(user_id);
+
+CREATE TABLE IF NOT EXISTS visit_passes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    poi_id TEXT NOT NULL REFERENCES pois(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL REFERENCES visit_requests(id) ON DELETE CASCADE,
+    pass_code TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_visit_passes_user ON visit_passes(user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS user_notifications (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    read_at TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_notifications ON user_notifications(user_id, created_at);
 """
 
 
@@ -387,6 +444,7 @@ MIGRATIONS = [
     "ALTER TABLE pois ADD COLUMN linger_until TEXT",
     "ALTER TABLE pois ADD COLUMN replay_clip_path TEXT",
     "ALTER TABLE pois ADD COLUMN live_ended_at TEXT",
+    "ALTER TABLE pois ADD COLUMN is_closed INTEGER NOT NULL DEFAULT 0",
 ]
 
 
@@ -404,7 +462,7 @@ def migrate(conn: sqlite3.Connection) -> None:
             continue
         if col == "menu_items_json" and col in poi_cols:
             continue
-        if col in ("status", "submitted_by", "facing_mode", "linger_until", "replay_clip_path", "live_ended_at") and col in poi_cols:
+        if col in ("status", "submitted_by", "facing_mode", "linger_until", "replay_clip_path", "live_ended_at", "is_closed") and col in poi_cols:
             continue
         try:
             conn.execute(sql)
@@ -425,6 +483,12 @@ def connect() -> sqlite3.Connection:
 
 def masks_dir() -> Path:
     d = db_path().parent / "masks"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def selfies_dir() -> Path:
+    d = db_path().parent / "visit_selfies"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

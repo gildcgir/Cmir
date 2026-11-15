@@ -20,6 +20,18 @@ FFMPEG = os.environ.get("FFMPEG", shutil.which("ffmpeg") or "/usr/local/bin/ffmp
 RELEASE_GRACE_SEC = 0.4
 
 
+def _drain_pipe(pipe) -> None:
+    try:
+        if not pipe:
+            return
+        while True:
+            chunk = pipe.read(4096)
+            if not chunk:
+                break
+    except Exception:
+        pass
+
+
 class LocalRelay:
     def __init__(self, store) -> None:
         self.store = store
@@ -242,6 +254,7 @@ class LocalRelay:
         ]
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            threading.Thread(target=_drain_pipe, args=(proc.stderr,), daemon=True).start()
             self._publishers[poi_id] = proc
             self._device_holder[idx] = poi_id
             print(f"[relay] publish poi {poi_id[:8]}… -> {rtmp} (device {idx} «{source_name}»)")
@@ -320,6 +333,7 @@ class LocalRelay:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
+            threading.Thread(target=_drain_pipe, args=(proc.stderr,), daemon=True).start()
             self._workers[poi_id] = proc
             print(f"[relay] mask worker poi {poi_id[:8]}… -> {stream}_avatar")
         except OSError as e:

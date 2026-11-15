@@ -1,0 +1,30 @@
+FROM python:3.11-slim
+
+# Install system utilities & ffmpeg for media relay
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install minimal required python libraries
+RUN pip install --no-cache-dir \
+    cryptography>=42.0.0 \
+    requests>=2.31.0
+
+# Copy application source code
+COPY apps/api_py /app/apps/api_py
+
+WORKDIR /app/apps/api_py
+
+# Ensure data directory exists
+RUN mkdir -p /app/data
+
+EXPOSE 8090
+
+ENV CMIR_HOST=0.0.0.0
+ENV CMIR_PORT=8090
+ENV CMIR_DATA_DIR=/app/data
+
+CMD ["python3", "server.py"]

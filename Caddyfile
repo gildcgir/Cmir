@@ -1,0 +1,46 @@
+{
+    email {$ACME_EMAIL:admin@cmir.live}
+}
+
+www.cmir.live {
+    redir https://cmir.live{uri} permanent
+}
+
+cmir.live, app.cmir.live {
+    encode gzip zstd
+
+    # MediaMTX HLS playback
+    handle /hls/* {
+        uri strip_prefix /hls
+        reverse_proxy mediamtx:8888 {
+            header_up Host {upstream_hostport}
+        }
+        header {
+            Access-Control-Allow-Origin *
+            Access-Control-Allow-Methods "GET, OPTIONS"
+            Access-Control-Allow-Headers "Range, Origin, Content-Type, Accept"
+            Access-Control-Expose-Headers "Content-Length, Content-Range"
+            Cache-Control "public, max-age=2"
+        }
+    }
+
+    # API routes
+    @api_routes {
+        path /api/* /health* /pois* /auth* /cameras* /consented-faces* /face-match* /presence* /admin-stats* /views* /wallets* /users* /submissions* /chat* /playback* /kiosk-stream* /airtime* /masks*
+    }
+    handle @api_routes {
+        reverse_proxy api:8090 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Static Web App (apps/web)
+    handle {
+        root * /srv/web
+        file_server
+        try_files {path} {path}/ /index.html
+    }
+}

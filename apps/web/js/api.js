@@ -1,4 +1,7 @@
 function defaultApiBase() {
+  if (typeof location !== "undefined" && location.protocol === "https:") {
+    return "";
+  }
   const host = typeof location !== "undefined" ? location.hostname : "";
   // Prefer 127.0.0.1 with adb reverse — "localhost" can resolve oddly on some devices.
   if (!host || host === "localhost" || host === "127.0.0.1") {
@@ -57,7 +60,11 @@ export async function api(method, path, body, isForm = false) {
   }
   const res = await fetch(API + path, opts);
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || res.statusText);
+  if (!res.ok) {
+    const err = new Error(json.error || res.statusText);
+    err.code = json.code || "";
+    throw err;
+  }
   return json;
 }
 

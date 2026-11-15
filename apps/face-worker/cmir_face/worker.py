@@ -147,13 +147,13 @@ def run(
     if consent_path:
         consented_faces = [{"embedding": e, "display_name": ""} for e in load_embeddings_json(consent_path)]
     elif api_url:
-        consented_faces = fetch_consented_faces_from_api(api_url)
+        consented_faces = fetch_consented_faces_from_api(api_url) or []
 
     def reload_consented() -> None:
         nonlocal consented_faces
         if api_url:
             fresh = fetch_consented_faces_from_api(api_url)
-            if fresh:
+            if fresh is not None:
                 consented_faces = fresh
 
     is_rtsp = input_path.lower().startswith(("rtsp://", "rtsps://", "http://", "https://"))

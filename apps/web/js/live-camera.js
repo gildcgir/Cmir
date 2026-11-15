@@ -32,10 +32,24 @@ const isMobileUa = /Android|iPhone|iPad|CmirAndroid/i.test(
 );
 
 function deviceIdFromCamera(cam) {
-  if (cam?.device_id) return cam.device_id;
+  if (cam?.device_id && !/^facing\//.test(cam.device_id) && !cam.device_id.startsWith("local://")) {
+    return cam.device_id;
+  }
   const url = cam?.stream_url || "";
-  if (url.startsWith("local://")) return url.slice(8);
+  if (url.startsWith("local://facing/")) return "";
+  if (url.startsWith("local://")) {
+    const rest = url.slice("local://".length);
+    if (!rest || rest.startsWith("facing/")) return "";
+    return rest;
+  }
   return "";
+}
+
+function isUsableDeviceId(id) {
+  if (!id || typeof id !== "string") return false;
+  if (id.startsWith("facing/") || id.startsWith("local://")) return false;
+  if (id.includes("/") && id.length < 20) return false;
+  return true;
 }
 
 function cosine(a, b) {
@@ -255,9 +269,9 @@ async function enumerateVideoDevices() {
 }
 
 function matchDeviceId(savedId, devices) {
-  if (!savedId) return "";
+  if (!savedId || !isUsableDeviceId(savedId)) return "";
   if (devices.some((d) => d.deviceId === savedId)) return savedId;
-  return savedId;
+  return "";
 }
 
 /** Синхронный fallback (без enumerateDevices). */
@@ -290,6 +304,7 @@ export function pickPreferredVideoDevice(devices) {
  * Если GoPro нет — заглушка: встроенная / USB веб-камера.
  */
 export async function resolveUsbDeviceIdAsync(cam, fallbackCams = []) {
+  if (isMobileUa) return "";
   const candidates = [cam, ...fallbackCams].filter(Boolean);
   const devices = await enumerateVideoDevices();
 
@@ -442,6 +457,41 @@ export class LiveCameraView {
     } catch (_) {}
   }
 
+  async _openCameraStream(deviceId, facingMode) {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("getUserMedia недоступен");
+    }
+    const facing = facingMode === "environment" ? "environment" : "user";
+    const attempts = [];
+    if (deviceId && isUsableDeviceId(deviceId) && !isMobileUa) {
+      attempts.push({ video: { deviceId: { exact: deviceId } }, audio: false });
+    }
+    if (isMobileUa) {
+      attempts.push({ video: { facingMode: facing }, audio: false });
+      attempts.push({ video: true, audio: false });
+    } else {
+      attempts.push({
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+      attempts.push({ video: { facingMode }, audio: false });
+      attempts.push({ video: true, audio: false });
+    }
+    let lastErr;
+    for (const constraints of attempts) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error("камера недоступна");
+  }
+
   async start({
     deviceId,
     facingMode = "",
@@ -468,57 +518,25 @@ export class LiveCameraView {
       this.ctx.fillRect(0, 0, this.canvas.width || 2, this.canvas.height || 2);
     }
 
-    // Privacy: detector must be ready before any camera pixels are painted
-    await this.init();
-    if (session !== this._session) return;
-
-    const idealW = isMobileUa ? 640 : 1280;
-    const idealH = isMobileUa ? 480 : 720;
+    const usableId = isUsableDeviceId(deviceId) && !isMobileUa ? deviceId : "";
     let stream;
-    if (deviceId) {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: deviceId }, width: { ideal: idealW }, height: { ideal: idealH } },
-        });
-      } catch (_) {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: facingMode || "user" }, width: { ideal: idealW }, height: { ideal: idealH } },
-          audio: false,
-        });
-      }
-    } else if (facingMode) {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: facingMode },
-            width: { ideal: idealW },
-            height: { ideal: idealH },
-          },
-          audio: false,
-        });
-      } catch (_) {
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { exact: facingMode } },
-            audio: false,
-          });
-        } catch (_) {
-          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        }
-      }
-    } else {
-      await ensureCameraPermission();
-      if (session !== this._session) return;
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: idealW }, height: { ideal: idealH } },
-        audio: false,
-      });
-    }
-    if (session !== this._session) {
-      this._releaseMediaStream(stream);
-      return;
+    try {
+      stream = await this._openCameraStream(usableId, facingMode);
+    } catch (e) {
+      const name = e?.name || "CameraError";
+      const msg = e?.message || "камера недоступна";
+      throw new Error(`${name}: ${msg}`);
     }
     this.stream = stream;
+    if (session !== this._session) {
+      this._releaseMediaStream(stream);
+      if (this.stream === stream) this.stream = null;
+      return;
+    }
+
+    // Attach + play immediately so Android WebView actually turns the camera on
+    // even if MediaPipe later fails (previously the stream leaked and the retry
+    // hit NotReadableError).
     this.video.srcObject = stream;
     this.video.muted = true;
     this.video.setAttribute("playsinline", "true");
@@ -538,6 +556,21 @@ export class LiveCameraView {
       await this.waitForVideoDims();
     } catch (e) {
       console.warn(e);
+    }
+    if (session !== this._session) {
+      this._releaseMediaStream(stream);
+      if (this.stream === stream) this.stream = null;
+      if (this.video.srcObject === stream) this.video.srcObject = null;
+      return;
+    }
+
+    try {
+      await this.init();
+    } catch (e) {
+      console.warn("MediaPipe init failed, using blur fallback", e);
+      this.detector = null;
+      this.detectorNear = null;
+      this.ready = false;
     }
     if (session !== this._session) {
       this._releaseMediaStream(stream);
@@ -612,7 +645,7 @@ export class LiveCameraView {
     });
     fetch(`${this.apiBase}/api/v1/face-match`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         embedding: sig,
         prior_user_id: priorUserId || "",
@@ -737,10 +770,15 @@ export class LiveCameraView {
     const vh = video.videoHeight;
     const { scale, ox, oy } = coverTransform(vw, vh, cw, ch);
 
-    // Detector not ready: stay black (never paint raw faces)
+    // Detector not ready: blur the live frame (never paint raw faces)
     if (!this.detector) {
-      this.ctx.fillStyle = "#000";
-      this.ctx.fillRect(0, 0, cw, ch);
+      this.ctx.filter = "blur(28px)";
+      this.ctx.drawImage(video, ox, oy, vw * scale, vh * scale);
+      this.ctx.filter = "none";
+      if (!this.privacyReady) {
+        this.privacyReady = true;
+        this.canvas.style.opacity = "1";
+      }
       return;
     }
 

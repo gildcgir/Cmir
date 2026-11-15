@@ -196,8 +196,8 @@
       <p class="sub">До регистрации лицо на камерах заведения закрыто маской. Сначала снимем профиль лица по ракурсам.</p>
       <div class="video-stage" id="videoStage">
         <div class="start-overlay" id="startOverlay">
-          <p>Камера скрыта до начала регистрации. Нажмите кнопку, чтобы пройти съёмку ракурсов лица.</p>
-          <button type="button" class="btn-start" id="btnStartEnroll">Начать регистрацию</button>
+      <p>Камера скрыта до начала съёмки. Заполните форму справа, затем нажмите кнопку и пройдите ракурсы лица.</p>
+          <button type="button" class="btn-start" id="btnStartEnroll">Снять ракурсы лица</button>
         </div>
         <div class="video-box privacy-composite" id="videoBox">
           <video id="live" class="live-source-hidden" autoplay playsinline muted></video>
@@ -218,17 +218,23 @@
 
     <section class="card" id="panelRegister">
       <h1>Регистрация</h1>
-      <p class="sub" id="registerSub">Сначала нажмите «Начать регистрацию» и снимите все ракурсы лица. Затем заполните форму и примите соглашения.</p>
+      <p class="sub" id="registerSub">Одна форма: данные, соглашения и съёмка ракурсов лица. Сначала заполните поля, затем снимите лицо и нажмите «Завершить регистрацию».</p>
       <div class="form-gate-msg" id="formGateMsg">
-        Ракурсы лица сохранены. Заполните форму ниже и примите соглашения для завершения регистрации.
+        Ракурсы лица сохранены. Примите соглашения и завершите регистрацию.
       </div>
 
-      <div class="form-section disabled" id="formSection">
-        <label for="fullName">Имя</label>
-        <input id="fullName" placeholder="Иван" autocomplete="given-name" />
+      <div class="form-section" id="formSection">
+        <label for="fullName">ФИО</label>
+        <input id="fullName" placeholder="Иван Иванов" autocomplete="name" />
 
         <label for="phone">Телефон</label>
         <input id="phone" type="tel" placeholder="+995 5XX XX XX XX" autocomplete="tel" />
+
+        <label for="email">Email</label>
+        <input id="email" type="email" placeholder="you@example.com" autocomplete="email" />
+
+        <label for="password">Пароль (мин. 8 символов)</label>
+        <input id="password" type="password" placeholder="Придумайте пароль для входа" autocomplete="new-password" minlength="8" />
 
         <label for="menuItem">Любимый пункт меню заведения</label>
         <select id="menuItem"><option value="">Загрузка…</option></select>
@@ -258,7 +264,7 @@
 
   <script type="module">
     import { getToken, setToken } from '../js/api.js';
-    import { startMaskedPageCamera } from '../js/live-camera.js?v=camfix9';
+    import { startMaskedPageCamera } from '../js/live-camera.js?v=camfix12';
     import { ENROLL_POSES, PoseEnrollment, yawPitchFromBbox, yawPitchFromKeypoints, yawPitchFromMatrix } from '../js/face-enroll.js?v=enroll6';
 
     const isAndroidApp = /CmirAndroid/i.test(navigator.userAgent || '');
@@ -366,6 +372,8 @@
       document.getElementById('panelRegister').classList.add('kiosk-locked');
       document.getElementById('fullName').disabled = true;
       document.getElementById('phone').disabled = true;
+      document.getElementById('email').disabled = true;
+      document.getElementById('password').disabled = true;
       document.getElementById('menuItem').disabled = true;
       document.querySelectorAll('#docsList input').forEach((cb) => { cb.disabled = true; });
       document.getElementById('accountLink').style.display = 'block';
@@ -390,10 +398,9 @@
 
     function unlockFormAfterFaces() {
       facesReady = true;
-      formSection.classList.remove('disabled');
       formGateMsg.classList.add('show');
       document.getElementById('registerSub').textContent =
-        'Заполните форму и примите соглашения для завершения регистрации.';
+        'Ракурсы готовы. Проверьте данные, примите соглашения и завершите регистрацию.';
       updateBtn();
     }
 
@@ -446,8 +453,10 @@
       const formOk = document.getElementById('fullName').value.trim()
         && document.getElementById('phone').value.trim()
         && document.getElementById('menuItem').value;
+      const pwd = document.getElementById('password').value;
+      const pwdOk = !pwd || pwd.length >= 8;
       const docsOk = DOC_KEYS.every((k) => accepted[k]);
-      btn.disabled = !(facesReady && formOk && docsOk && capturedTemplates.length >= ENROLL_POSES.length);
+      btn.disabled = !(facesReady && formOk && docsOk && pwdOk && capturedTemplates.length >= ENROLL_POSES.length);
     }
 
     function renderDocs() {
@@ -576,7 +585,7 @@
       stopLive();
       try {
         // Prefer front camera for kiosk enrollment
-        const { LiveCameraView } = await import('../js/live-camera.js?v=camfix9');
+        const { LiveCameraView } = await import('../js/live-camera.js?v=camfix12');
         const canvas = document.getElementById('liveMaskCanvas');
         liveView = new LiveCameraView(live, canvas);
         await liveView.start({
@@ -591,7 +600,7 @@
         // Fallback to configured POI camera path
         try {
           const fallbacks = (poi?.cameras || []).filter((c) => c.is_active && c.id !== cam?.id);
-          const { startMaskedPageCamera } = await import('../js/live-camera.js?v=camfix9');
+          const { startMaskedPageCamera } = await import('../js/live-camera.js?v=camfix12');
           const result = await startMaskedPageCamera({
             video: live,
             canvas: document.getElementById('liveMaskCanvas'),
@@ -707,7 +716,6 @@
       btnStart.disabled = true;
       capturedTemplates = [];
       facesReady = false;
-      formSection.classList.add('disabled');
       formGateMsg.classList.remove('show');
       renderEnrollSteps([]);
       showCameraStage();
@@ -760,6 +768,8 @@
         const payload = {
           full_name: document.getElementById('fullName').value.trim(),
           phone: document.getElementById('phone').value.trim(),
+          email: document.getElementById('email').value.trim(),
+          password: document.getElementById('password').value,
           favorite_menu_item: document.getElementById('menuItem').value,
           face_embedding: capturedTemplates[0].embedding,
           face_embeddings: capturedTemplates,
@@ -784,8 +794,9 @@
     };
 
     ['input', 'change'].forEach((ev) => {
-      document.getElementById('fullName').addEventListener(ev, updateBtn);
-      document.getElementById('phone').addEventListener(ev, updateBtn);
+      ['fullName', 'phone', 'email', 'password'].forEach((id) => {
+        document.getElementById(id).addEventListener(ev, updateBtn);
+      });
     });
 
     try {

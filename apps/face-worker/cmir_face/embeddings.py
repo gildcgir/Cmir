@@ -156,7 +156,7 @@ def post_face_presence(api_url: str, camera_id: str, presence: List[dict], worke
         print(f"Warning: face-presence report failed: {e}")
 
 
-def fetch_consented_faces_from_api(api_url: str) -> List[dict]:
+def fetch_consented_faces_from_api(api_url: str) -> Optional[List[dict]]:
     try:
         import os
         import urllib.request
@@ -166,11 +166,13 @@ def fetch_consented_faces_from_api(api_url: str) -> List[dict]:
         headers = {"X-Cmir-Worker": token} if token else {}
         req = urllib.request.Request(url, headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=5) as resp:
+            if getattr(resp, "status", 200) != 200:
+                return None
             data = json.loads(resp.read().decode())
         return list(data.get("data", {}).get("faces", []))
     except Exception as e:
         print(f"Warning: could not fetch consented faces: {e}")
-        return []
+        return None
 
 
 def fetch_embeddings_from_api(api_url: str, poi_id: str) -> List[np.ndarray]:

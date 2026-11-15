@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.webkit.ConsoleMessage
+import android.webkit.GeolocationPermissions
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -31,6 +32,8 @@ import androidx.core.view.WindowCompat
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private var pendingPermissionRequest: PermissionRequest? = null
+    private var pendingGeoOrigin: String? = null
+    private var pendingGeoCallback: GeolocationPermissions.Callback? = null
     private var loadFailed = false
     private var startUrl: String = ""
     private var mainFrameRetries = 0
@@ -44,6 +47,16 @@ class MainActivity : AppCompatActivity() {
             if (granted) req.grant(req.resources) else req.deny()
             pendingPermissionRequest = null
         }
+    }
+
+    private val requestLocation = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { granted ->
+        val ok = granted[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+            granted[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        pendingGeoCallback?.invoke(pendingGeoOrigin, ok, false)
+        pendingGeoCallback = null
+        pendingGeoOrigin = null
     }
 
     private val retryLabRunnable = object : Runnable {
@@ -75,6 +88,7 @@ class MainActivity : AppCompatActivity() {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.mediaPlaybackRequiresUserGesture = false
+        settings.setGeolocationEnabled(true)
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         settings.userAgentString = settings.userAgentString + " CmirAndroid/1.0"
         settings.setSupportMultipleWindows(true)
@@ -195,6 +209,34 @@ class MainActivity : AppCompatActivity() {
                     pendingPermissionRequest = request
                     maybeShowCameraDisclosureThenRequest()
                 }
+            }
+
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: GeolocationPermissions.Callback?
+            ) {
+                val fine = ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                )
+                val coarse = ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+                if (fine == PackageManager.PERMISSION_GRANTED ||
+                    coarse == PackageManager.PERMISSION_GRANTED
+                ) {
+                    callback?.invoke(origin, true, false)
+                    return
+                }
+                pendingGeoOrigin = origin
+                pendingGeoCallback = callback
+                requestLocation.launch(
+                    arrayOf(
+                        Manifest.permission.ACCESS_FINE_LOCATION,
+                        Manifest.permission.ACCESS_COARSE_LOCATION
+                    )
+                )
             }
         }
 

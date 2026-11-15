@@ -55,7 +55,8 @@ def main() -> int:
     cid = cam["id"]
 
     pb = api_call(API, "GET", f"/api/v1/cameras/{cid}/playback")["data"]
-    checks.append(("playback_hls", pb.get("hls_url", "").endswith(".m3u8")))
+    checks.append(("playback_no_rtsp", "stream_url" not in pb and "rtsp_url" not in pb))
+    checks.append(("playback_shape", "hls_url" in pb and "camera_id" in pb))
 
     api_call(
         API,
@@ -64,7 +65,7 @@ def main() -> int:
         {"camera_id": cid, "status": "reachable", "detail": "test"},
         token=admin_token,
     )
-    hist = api_call(API, "GET", f"/api/v1/admin/{cid}/health-history")["data"]
+    hist = api_call(API, "GET", f"/api/v1/admin/{cid}/health-history", token=admin_token)["data"]
     checks.append(("health_history", len(hist) >= 1))
 
     consent = api_call(
@@ -80,8 +81,8 @@ def main() -> int:
     w = api_call(API, "GET", f"/api/v1/wallets/{wallet}")["data"]
     checks.append(("wallet_balance", "balance_ut" in w))
 
-    api_call(API, "POST", f"/api/v1/pois/{pid}/airtime", {"wallet": wallet, "seconds": 120})
-    air = api_call(API, "GET", f"/api/v1/pois/{pid}/airtime")["data"]
+    api_call(API, "POST", f"/api/v1/pois/{pid}/airtime", {"wallet": wallet, "seconds": 120}, token=admin_token)
+    air = api_call(API, "GET", f"/api/v1/pois/{pid}/airtime", token=token)["data"]
     checks.append(("airtime", len(air) >= 1))
 
     don = api_call(
@@ -89,6 +90,7 @@ def main() -> int:
         "POST",
         "/api/v1/donations",
         {"poi_id": pid, "amount": 25, "message": "test", "donor": "e2e"},
+        token=token,
     )["data"]
     checks.append(("donation", don["status"] == "pending_moderation"))
 

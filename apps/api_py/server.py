@@ -10,11 +10,13 @@ import os
 import re
 import secrets
 import sys
+import time
 import http.cookiejar
 import urllib.parse
 import urllib.request
+from collections import defaultdict
 from dataclasses import asdict
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
@@ -212,6 +214,48 @@ def require_admin(handler: BaseHTTPRequestHandler) -> Optional[dict]:
     return user
 
 
+def perm_response(handler: BaseHTTPRequestHandler, exc: Exception) -> None:
+    msg = str(exc)
+    if msg == "kiosk_required":
+        json_response(
+            handler,
+            403,
+            {
+                "success": False,
+                "error": "Сначала зарегистрируйтесь в киоске согласия",
+                "code": "kiosk_required",
+            },
+        )
+        return
+    if msg == "too_far":
+        json_response(
+            handler,
+            403,
+            {
+                "success": False,
+                "error": "Вы должны находиться в радиусе 50 м от места трансляции",
+                "code": "too_far",
+            },
+        )
+        return
+    json_response(handler, 403, {"success": False, "error": msg})
+
+
+_FACE_MATCH_HITS: dict[str, list[float]] = defaultdict(list)
+
+
+def face_match_rate_limited(handler: BaseHTTPRequestHandler, limit: int = 40, window: float = 60.0) -> bool:
+    ip = handler.client_address[0] if handler.client_address else "unknown"
+    now = time.time()
+    bucket = [t for t in _FACE_MATCH_HITS[ip] if now - t < window]
+    if len(bucket) >= limit:
+        _FACE_MATCH_HITS[ip] = bucket
+        return True
+    bucket.append(now)
+    _FACE_MATCH_HITS[ip] = bucket
+    return False
+
+
 def _worker_authorized(handler: BaseHTTPRequestHandler) -> bool:
     """Face-worker: X-Cmir-Worker must match CMIR_WORKER_TOKEN (always required)."""
     expected = os.environ.get("CMIR_WORKER_TOKEN", "").strip()
@@ -390,6 +434,34 @@ class Handler(BaseHTTPRequestHandler):
             if user is None:
                 return
             return json_response(self, 200, {"success": True, "data": STORE.user_public(user)})
+
+        if path == "/api/v1/auth/notifications":
+            user = require_user(self)
+            if user is None:
+                return
+            return json_response(self, 200, {"success": True, "data": STORE.list_notifications(user["id"])})
+
+        if path == "/api/v1/auth/visit-passes":
+            user = require_user(self)
+            if user is None:
+                return
+            return json_response(self, 200, {"success": True, "data": STORE.list_visit_passes(user["id"])})
+
+        if path == "/api/v1/auth/visit-requests":
+            user = require_user(self)
+            if user is None:
+                return
+            return json_response(self, 200, {"success": True, "data": STORE.list_my_visit_requests(user["id"])})
+
+        if len(parts) == 4 and parts[2] == "users" and parts[3]:
+            user = require_user(self)
+            if user is None:
+                return
+            try:
+                card = STORE.public_user_card(parts[3])
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "user not found"})
+            return json_response(self, 200, {"success": True, "data": card})
 
         if path == "/api/v1/legal/documents":
             from compliance import list_legal_documents
@@ -571,9 +643,7 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, 404, {"success": False, "error": "no camera"})
             cam_obj = STORE.get_camera(cam["id"])
             is_local = cam_obj.source_type == "local_usb" or cam_obj.stream_url.startswith("local://")
-            client_id = qs.get("client_id", [""])[0] or "kiosk"
-            if is_local:
-                LOCAL_RELAY.acquire(poi_id, client_id, wait_hls=True)
+            # GET must not acquire/force the USB relay (C4 bypass)
             masked_direct = masked_stream_hls(cam_obj.stream_url, poi_id)
             raw_direct = stream_url_to_hls(cam_obj.stream_url, poi_id)
             if is_local:
@@ -645,6 +715,46 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, 404, {"success": False, "error": "poi not found"})
             return json_response(self, 200, {"success": True, "data": data})
 
+        if len(parts) == 5 and parts[2] == "pois" and parts[4] == "visit-requests":
+            user = require_user(self)
+            if user is None:
+                return
+            try:
+                data = STORE.list_visit_requests_for_host(user, parts[3])
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "poi not found"})
+            except PermissionError as e:
+                return perm_response(self, e)
+            return json_response(self, 200, {"success": True, "data": data})
+
+        if len(parts) == 5 and parts[2] == "visit-requests" and parts[4] == "selfie":
+            user = require_user(self)
+            if user is None:
+                return
+            req = STORE.get_visit_request(parts[3])
+            if not req or not req.get("selfie_path"):
+                return json_response(self, 404, {"success": False, "error": "selfie not found"})
+            if req["user_id"] != user["id"] and not STORE.is_poi_host(user, req["poi_id"]):
+                return json_response(self, 403, {"success": False, "error": "forbidden"})
+            path = Path(req["selfie_path"])
+            if not path.is_file():
+                return json_response(self, 404, {"success": False, "error": "file missing"})
+            data = path.read_bytes()
+            ext = path.suffix.lower()
+            mime = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
+            }.get(ext, "image/jpeg")
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if path == "/api/v1/tops/consent":
             items = STORE.sorted_tops("consent", city, country)
             return json_response(
@@ -658,6 +768,8 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         if path == "/api/v1/donations":
+            if require_admin(self) is None:
+                return
             poi_f = qs.get("poi_id", [None])[0]
             return json_response(self, 200, {"success": True, "data": STORE.list_donations(poi_f)})
 
@@ -690,13 +802,38 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, 404, {"success": False, "error": "not found"})
             return json_response(self, 200, {"success": True, "data": data})
 
+        if path == "/api/v1/cameras/health-all":
+            if require_admin(self) is None:
+                return
+            data = []
+            for row in STORE.conn.execute("SELECT id FROM cameras WHERE is_active = 1").fetchall():
+                cam = STORE.get_camera(row["id"])
+                if cam:
+                    probe = probe_stream_url(cam.stream_url)
+                    data.append(
+                        {
+                            "camera_id": cam.id,
+                            "poi_id": cam.poi_id,
+                            "is_active": cam.is_active,
+                            **probe,
+                        }
+                    )
+            return json_response(self, 200, {"success": True, "data": data})
+
         if len(parts) == 4 and parts[2] == "cameras":
             cam = STORE.get_camera(parts[3])
             if not cam:
                 return json_response(self, 404, {"success": False, "error": "camera not found"})
-            return json_response(self, 200, {"success": True, "data": asdict(cam)})
+            data = asdict(cam)
+            user = STORE.user_from_token(bearer_token(self))
+            if not (user and STORE.is_admin(user)):
+                data.pop("stream_url", None)
+                data.pop("device_id", None)
+            return json_response(self, 200, {"success": True, "data": data})
 
         if len(parts) == 5 and parts[2] == "cameras" and parts[4] == "health":
+            if require_admin(self) is None:
+                return
             cam = STORE.get_camera(parts[3])
             if not cam:
                 return json_response(self, 404, {"success": False, "error": "camera not found"})
@@ -704,7 +841,6 @@ class Handler(BaseHTTPRequestHandler):
             data = {
                 "camera_id": cam.id,
                 "poi_id": cam.poi_id,
-                "stream_url": cam.stream_url,
                 "is_active": cam.is_active,
                 **probe,
             }
@@ -715,9 +851,7 @@ class Handler(BaseHTTPRequestHandler):
             if not cam:
                 return json_response(self, 404, {"success": False, "error": "camera not found"})
             is_local = cam.source_type == "local_usb" or cam.stream_url.startswith("local://")
-            client_id = qs.get("client_id", [""])[0] or "playback-anon"
-            if is_local:
-                LOCAL_RELAY.acquire(cam.poi_id, client_id, wait_hls=True)
+            # GET playback must not acquire the USB relay (C4 bypass)
             hls_direct = stream_url_to_hls(cam.stream_url, cam.poi_id)
             masked_direct = masked_stream_hls(cam.stream_url, cam.poi_id)
             stream_ready = hls_playlist_ready(hls_direct) if hls_direct else False
@@ -739,7 +873,6 @@ class Handler(BaseHTTPRequestHandler):
                     "data": {
                         "camera_id": cam.id,
                         "poi_id": cam.poi_id,
-                        "stream_url": cam.stream_url,
                         "source_type": cam.source_type,
                         "hls_url": hls if (masked_ready or not is_local) and stream_ready else None,
                         "masked_hls_url": masked if masked_ready else None,
@@ -749,7 +882,6 @@ class Handler(BaseHTTPRequestHandler):
                         "masked_ready": masked_ready,
                         "privacy_buffered": masked_ready,
                         "preview_clip": preview,
-                        "rtsp_url": cam.stream_url if cam.stream_url.startswith("rtsp") else None,
                     },
                 },
             )
@@ -790,6 +922,9 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, 200, {"success": True, "data": STORE.list_users()})
 
         if len(parts) == 5 and parts[2] == "pois" and parts[4] == "airtime":
+            user = require_user(self)
+            if user is None:
+                return
             try:
                 data = STORE.list_airtime(parts[3])
             except KeyError:
@@ -802,24 +937,9 @@ class Handler(BaseHTTPRequestHandler):
                 return json_response(self, 404, {"success": False, "error": "wallet not found"})
             return json_response(self, 200, {"success": True, "data": w})
 
-        if path == "/api/v1/cameras/health-all":
-            data = []
-            for row in STORE.conn.execute("SELECT id FROM cameras WHERE is_active = 1").fetchall():
-                cam = STORE.get_camera(row["id"])
-                if cam:
-                    probe = probe_stream_url(cam.stream_url)
-                    data.append(
-                        {
-                            "camera_id": cam.id,
-                            "poi_id": cam.poi_id,
-                            "stream_url": cam.stream_url,
-                            "is_active": cam.is_active,
-                            **probe,
-                        }
-                    )
-            return json_response(self, 200, {"success": True, "data": data})
-
         if len(parts) == 5 and parts[2] == "admin" and parts[4] == "health-history":
+            if require_admin(self) is None:
+                return
             hist = STORE.health_snapshots.get(parts[3], [])
             return json_response(self, 200, {"success": True, "data": hist})
 
@@ -890,6 +1010,16 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json()
 
         if path == "/api/v1/auth/register":
+            if app_env() == "prod":
+                return json_response(
+                    self,
+                    400,
+                    {
+                        "success": False,
+                        "error": "Регистрация только через киоск согласия",
+                        "code": "kiosk_required",
+                    },
+                )
             try:
                 user = STORE.register_user(
                     body.get("email", ""),
@@ -1048,6 +1178,11 @@ class Handler(BaseHTTPRequestHandler):
             wait = bool(body.get("wait_hls", True))
             # browser_usb: клиент держит FaceTime через getUserMedia — освобождаем ffmpeg
             if body.get("browser_usb") or body.get("publish") is False:
+                user = require_user(self)
+                if user is None:
+                    return
+                if not STORE.is_admin(user) and not STORE.is_poi_host(user, poi_id):
+                    return json_response(self, 403, {"success": False, "error": "host or admin required"})
                 LOCAL_RELAY.force_stop(poi_id)
                 return json_response(
                     self,
@@ -1159,6 +1294,8 @@ class Handler(BaseHTTPRequestHandler):
                     client_meta={"ip": self.client_address[0]},
                     embeddings=embs if isinstance(embs, list) else None,
                     require_multi=True,
+                    email=body.get("email") or "",
+                    password=body.get("password") or "",
                 )
             except KeyError:
                 return json_response(self, 404, {"success": False, "error": "poi not found"})
@@ -1170,6 +1307,73 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {"success": True, "data": data, "message": data.get("message", "")},
             )
+
+        if len(parts) == 5 and parts[2] == "pois" and parts[4] == "guest-streams":
+            user = require_user(self)
+            if user is None:
+                return
+            try:
+                data = STORE.start_guest_stream(user, parts[3], body)
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "poi not found"})
+            except PermissionError as e:
+                return perm_response(self, e)
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            return json_response(self, 200, {"success": True, "data": data})
+
+        if len(parts) == 6 and parts[2] == "pois" and parts[4] == "guest-streams" and parts[5] == "stop":
+            user = require_user(self)
+            if user is None:
+                return
+            try:
+                data = STORE.stop_guest_stream(user, parts[3], body.get("stream_id"))
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "guest stream not found"})
+            except PermissionError as e:
+                return perm_response(self, e)
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            return json_response(self, 200, {"success": True, "data": data})
+
+        if len(parts) == 5 and parts[2] == "pois" and parts[4] == "visit-requests":
+            user = require_user(self)
+            if user is None:
+                return
+            try:
+                blob, ext = STORE.decode_selfie_data_url(body.get("selfie") or "")
+                data = STORE.create_visit_request(user, parts[3], body, blob, ext)
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "poi not found"})
+            except PermissionError as e:
+                return perm_response(self, e)
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            return json_response(self, 200, {"success": True, "data": data})
+
+        if len(parts) == 5 and parts[2] == "visit-requests" and parts[4] in ("approve", "reject"):
+            user = require_user(self)
+            if user is None:
+                return
+            try:
+                data = STORE.decide_visit_request(user, parts[3], approve=(parts[4] == "approve"))
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "request not found"})
+            except PermissionError as e:
+                return perm_response(self, e)
+            except ValueError as e:
+                return json_response(self, 400, {"success": False, "error": str(e)})
+            return json_response(self, 200, {"success": True, "data": data})
+
+        if len(parts) == 6 and parts[2] == "auth" and parts[3] == "notifications" and parts[5] == "read":
+            user = require_user(self)
+            if user is None:
+                return
+            try:
+                data = STORE.mark_notification_read(user["id"], parts[4])
+            except KeyError:
+                return json_response(self, 404, {"success": False, "error": "notification not found"})
+            return json_response(self, 200, {"success": True, "data": data})
 
         if len(parts) == 5 and parts[2] == "pois" and parts[4] == "signature-bind":
             user = require_user(self)
@@ -1323,6 +1527,8 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, 200, {"success": True, "data": data})
 
         if path == "/api/v1/face-match":
+            if face_match_rate_limited(self):
+                return json_response(self, 429, {"success": False, "error": "rate limited"})
             emb = body.get("embedding")
             if not isinstance(emb, list):
                 return json_response(self, 400, {"success": False, "error": "embedding required"})
@@ -1330,13 +1536,23 @@ class Handler(BaseHTTPRequestHandler):
                 vec = [float(x) for x in emb]
             except (TypeError, ValueError):
                 return json_response(self, 400, {"success": False, "error": "invalid embedding"})
+            worker_ok = _worker_authorized(self)
+            user = STORE.user_from_token(bearer_token(self))
+            if app_env() == "prod" and not worker_ok and not user:
+                return json_response(self, 401, {"success": False, "error": "unauthorized"})
             hit = STORE.match_face_embedding(
                 vec,
                 prior_user_id=str(body.get("prior_user_id") or ""),
             )
             if not hit:
                 return json_response(self, 200, {"success": True, "data": {"matched": False}})
-            return json_response(self, 200, {"success": True, "data": hit})
+            if worker_ok or user:
+                return json_response(self, 200, {"success": True, "data": hit})
+            return json_response(
+                self,
+                200,
+                {"success": True, "data": {"matched": True}},
+            )
 
         if path == "/api/v1/face-presence":
             # face-worker: пакет presence с worker-token; пользователь — только self
@@ -1400,6 +1616,8 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         if path == "/api/v1/admin/health-snapshot":
+            if require_admin(self) is None:
+                return
             snap = STORE.record_health_snapshot(
                 body.get("camera_id", ""),
                 body.get("status", "unknown"),
@@ -1408,19 +1626,24 @@ class Handler(BaseHTTPRequestHandler):
             return json_response(self, 200, {"success": True, "data": snap})
 
         if path == "/api/v1/donations":
+            user = require_user(self)
+            if user is None:
+                return
             poi_id = body.get("poi_id", "")
             try:
                 d = STORE.add_donation(
                     poi_id,
                     float(body.get("amount", 0)),
                     body.get("message", ""),
-                    body.get("donor", "anonymous"),
+                    body.get("donor", user.get("display_name") or "user"),
                 )
             except KeyError:
                 return json_response(self, 404, {"success": False, "error": "poi not found"})
             return json_response(self, 200, {"success": True, "data": d})
 
         if len(parts) == 5 and parts[2] == "pois" and parts[4] == "airtime":
+            if require_admin(self) is None:
+                return
             try:
                 entry = STORE.add_airtime(
                     parts[3], body.get("wallet", ""), float(body.get("seconds", 0))
@@ -1461,7 +1684,7 @@ class Handler(BaseHTTPRequestHandler):
                     k: body[k]
                     for k in (
                         "name", "description", "promo_description", "city", "country",
-                        "address", "comment", "facing_mode", "latitude", "longitude",
+                        "address", "comment", "facing_mode", "latitude", "longitude", "is_closed",
                     )
                     if k in body
                 }
@@ -1602,8 +1825,23 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"Cmir API (Python) http://{HOST}:{PORT} — SQLite core")
-    HTTPServer((HOST, PORT), Handler).serve_forever()
+    env_set = os.environ.get("CMIR_ENV", "").strip()
+    if HOST in ("0.0.0.0", "::", "::0") and not env_set:
+        raise SystemExit(
+            "Refusing to bind 0.0.0.0 without CMIR_ENV. "
+            "Set CMIR_ENV=test for lab or CMIR_ENV=prod with secrets."
+        )
+    if app_env() == "prod":
+        from compliance import require_data_key_in_prod
+
+        require_data_key_in_prod()
+        if not os.environ.get("CMIR_ADMIN_PASSWORD", "").strip():
+            raise SystemExit("CMIR_ADMIN_PASSWORD is required in production")
+        if not os.environ.get("CMIR_WORKER_TOKEN", "").strip():
+            raise SystemExit("CMIR_WORKER_TOKEN is required in production")
+    server_cls = ThreadingHTTPServer if sys.version_info >= (3, 7) else HTTPServer
+    print(f"Cmir API (Python) http://{HOST}:{PORT} — SQLite core env={app_env()} (threaded)")
+    server_cls((HOST, PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":

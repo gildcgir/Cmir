@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import secrets
 import sqlite3
+import string
 import uuid
+import base64
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -26,7 +30,7 @@ from compliance import (
     require_data_key_in_prod,
     validate_acceptances,
 )
-from database import app_env, connect, db_path, masks_dir, row_to_dict
+from database import app_env, connect, db_path, masks_dir, row_to_dict, selfies_dir
 from face_profiles import MIN_TEMPLATES, REQUIRED_POSES, normalize_face_templates
 from stream_paths import poi_rtmp_url
 from stream_recorder import RECORDER
@@ -37,7 +41,32 @@ AD_USER_POOL_RATIO = 0.5
 # 1 единица денежной выручки рекламы → столько UT при полном пуле
 AD_UT_PER_REVENUE = 100.0
 VIEW_MODES = frozenset({"fisheye", "standard", "zoom2x"})
-CAMERA_ROLES = frozenset({"general", "consent", "performance"})
+CAMERA_ROLES = frozenset({"general", "consent", "performance", "guest"})
+GEO_RADIUS_M = 50.0
+PASS_CODE_ALPHABET = string.ascii_uppercase + string.digits
+VISIT_ENTRY_WARNING = (
+    "Владелец мероприятия оставляет за собой право отказать во входе, "
+    "если вы будете в плохой кондиции."
+)
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "closed")
+    return False
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlamb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlamb / 2) ** 2
+    return 2 * radius * math.asin(min(1.0, math.sqrt(a)))
 
 
 class PoiType(str, Enum):
@@ -252,6 +281,19 @@ class Store:
             row = self.conn.execute("SELECT * FROM users WHERE email = ?", (cand,)).fetchone()
             if row:
                 break
+        if not row and ident:
+            try:
+                phone = normalize_phone(ident)
+                prow = self.conn.execute(
+                    "SELECT user_id FROM user_profiles WHERE phone = ?",
+                    (phone,),
+                ).fetchone()
+                if prow:
+                    row = self.conn.execute(
+                        "SELECT * FROM users WHERE id = ?", (prow["user_id"],)
+                    ).fetchone()
+            except ValueError:
+                pass
         if not row or not verify_password(password, row["password_hash"]):
             raise ValueError("invalid credentials")
         if is_blocked(row["blocked_until"]):
@@ -318,6 +360,7 @@ class Store:
             "wallet": row_to_dict(wallet),
             "consents": [row_to_dict(c) for c in consents],
             "profile": self.get_user_profile(user["id"]),
+            "kiosk_registered": self.is_kiosk_registered(user),
         }
 
     def is_admin(self, user: dict) -> bool:
@@ -339,6 +382,33 @@ class Store:
         if not row or not row["submitted_by"]:
             return False
         return row["submitted_by"] == user.get("id")
+
+    def is_kiosk_registered(self, user: Optional[dict]) -> bool:
+        """Full platform account = kiosk consent form (FIO + phone + face templates)."""
+        if not user or not user.get("id"):
+            return False
+        if self.is_admin(user):
+            return True
+        prof = self.get_user_profile(user["id"])
+        if not prof:
+            return False
+        if not (prof.get("full_name") or "").strip():
+            return False
+        if not (prof.get("phone") or "").strip():
+            return False
+        row = self.conn.execute(
+            """
+            SELECT 1 FROM consents
+            WHERE user_id = ? AND revoked_at IS NULL AND face_embedding IS NOT NULL
+            LIMIT 1
+            """,
+            (user["id"],),
+        ).fetchone()
+        return bool(row)
+
+    def require_kiosk_registered(self, user: dict) -> None:
+        if not self.is_kiosk_registered(user):
+            raise PermissionError("kiosk_required")
 
     def promote_to_host(self, user_id: str) -> None:
         row = self.conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
@@ -489,6 +559,7 @@ class Store:
             "status": p.get("status") or "published",
             "submitted_by": p.get("submitted_by"),
             "facing_mode": p.get("facing_mode") or "user",
+            "is_closed": bool(int(p.get("is_closed") or 0)),
             "linger_until": p.get("linger_until"),
             "live_ended_at": p.get("live_ended_at"),
             "replay_clip_url": (
@@ -496,6 +567,7 @@ class Store:
             ),
             "mask_image_url": f"/api/v1/pois/{poi_id}/mask-image" if p.get("mask_image") else None,
             "cameras": cams,
+            "guest_streams": [] if bool(int(p.get("is_closed") or 0)) else self.list_live_guest_streams(poi_id),
             "stats": {
                 "poi_id": poi_id,
                 "consent_rate_percent": rate,
@@ -552,8 +624,8 @@ class Store:
             """
             INSERT INTO pois (id, name, description, poi_type, latitude, longitude,
                 promo_description, city, country, address, comment, consent_rate, participants_24h,
-                status, submitted_by, facing_mode, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
+                status, submitted_by, facing_mode, is_closed, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?)
             """,
             (
                 poi_id,
@@ -570,6 +642,7 @@ class Store:
                 body.get("status", "published"),
                 body.get("submitted_by"),
                 body.get("facing_mode", "user"),
+                1 if _as_bool(body.get("is_closed")) else 0,
                 t,
                 t,
             ),
@@ -642,6 +715,9 @@ class Store:
                     raise ValueError("facing_mode must be user or environment")
                 fields.append(f"{key} = ?")
                 vals.append(body[key])
+        if "is_closed" in body:
+            fields.append("is_closed = ?")
+            vals.append(1 if _as_bool(body["is_closed"]) else 0)
         if "latitude" in body:
             fields.append("latitude = ?")
             vals.append(float(body["latitude"]))
@@ -1114,6 +1190,8 @@ class Store:
         embeddings: Optional[List[Any]] = None,
         *,
         require_multi: bool = False,
+        email: str = "",
+        password: str = "",
     ) -> dict:
         validate_acceptances(acceptances)
         if not self.conn.execute("SELECT 1 FROM pois WHERE id = ?", (poi_id,)).fetchone():
@@ -1128,27 +1206,69 @@ class Store:
         ensure_legal_documents(self.conn)
         docs = {d["doc_type"]: d for d in list_legal_documents(self.conn)}
         phone_norm = normalize_phone(phone)
-        email = phone_to_email(phone_norm)
+        kiosk_email = phone_to_email(phone_norm)
+        chosen_email = (email or "").strip().lower()
+        if chosen_email:
+            if "@" not in chosen_email:
+                raise ValueError("invalid email")
+        else:
+            chosen_email = kiosk_email
+        pwd = (password or "").strip()
+        if pwd and len(pwd) < 8:
+            raise ValueError("password must be at least 8 characters")
         t = now_iso()
 
-        row = self.conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        row = None
+        for cand in dict.fromkeys([kiosk_email, chosen_email]):
+            row = self.conn.execute("SELECT * FROM users WHERE email = ?", (cand,)).fetchone()
+            if row:
+                break
+        if not row:
+            prow = self.conn.execute(
+                "SELECT user_id FROM user_profiles WHERE phone = ?", (phone_norm,)
+            ).fetchone()
+            if prow:
+                row = self.conn.execute(
+                    "SELECT * FROM users WHERE id = ?", (prow["user_id"],)
+                ).fetchone()
+
         temporary_password: Optional[str] = None
         if row:
             user_id = row["id"]
+            if chosen_email != row["email"]:
+                clash = self.conn.execute(
+                    "SELECT 1 FROM users WHERE email = ? AND id != ?",
+                    (chosen_email, user_id),
+                ).fetchone()
+                if clash:
+                    raise ValueError("email already registered")
+            sets = ["display_name = ?", "email = ?", "updated_at = ?"]
+            vals: list[Any] = [full_name.strip(), chosen_email, t]
+            if pwd:
+                sets.insert(2, "password_hash = ?")
+                vals.insert(2, hash_password(pwd))
+            vals.append(user_id)
             self.conn.execute(
-                "UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?",
-                (full_name.strip(), t, user_id),
+                f"UPDATE users SET {', '.join(sets)} WHERE id = ?",
+                vals,
             )
         else:
             user_id = str(uuid.uuid4())
-            temporary_password = secrets.token_urlsafe(12)
-            self.conn.execute(
-                """
-                INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (user_id, email, hash_password(temporary_password), full_name.strip(), t, t),
-            )
+            if pwd:
+                password_hash = hash_password(pwd)
+            else:
+                temporary_password = secrets.token_urlsafe(12)
+                password_hash = hash_password(temporary_password)
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, chosen_email, password_hash, full_name.strip(), t, t),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError("email already registered")
             self._ensure_wallet(user_id)
 
         prof = self.conn.execute("SELECT 1 FROM user_profiles WHERE user_id = ?", (user_id,)).fetchone()
@@ -1229,7 +1349,7 @@ class Store:
             "user_id": user_id,
             "display_name": full_name.strip(),
             "phone": phone_norm,
-            "login_email": email,
+            "login_email": chosen_email,
             "favorite_menu_item": favorite_menu_item.strip(),
             "consent": consent,
             "wallet": row_to_dict(wallet),
@@ -1241,7 +1361,7 @@ class Store:
         if temporary_password:
             out["temporary_password"] = temporary_password
             out["message"] += (
-                f" Сохраните вход: телефон {phone_norm} (или {email})"
+                f" Сохраните вход: телефон {phone_norm} (или {chosen_email})"
                 f" и пароль {temporary_password}."
             )
         return out
@@ -1458,8 +1578,6 @@ class Store:
         return {
             "address": d["address"],
             "user_id": d["user_id"],
-            "email": d["email"],
-            "display_name": d["display_name"],
             "balance_st": d["balance_st"],
             "balance_ut": d["balance_ut"],
             "created_at": d["created_at"],
@@ -2228,6 +2346,7 @@ class Store:
             "status": "pending",
             "submitted_by": user["id"],
             "facing_mode": facing,
+            "is_closed": _as_bool(body.get("is_closed")),
         })
         # Browser/phone camera as local source until admin wires RTSP
         self.add_camera(poi.id, {
@@ -2500,3 +2619,394 @@ class Store:
             (poi_id, user_id),
         )
         self.conn.commit()
+
+    # --- Guest streams (open events) / visit requests (closed events) ---
+
+    def _poi_row(self, poi_id: str) -> sqlite3.Row:
+        row = self.conn.execute("SELECT * FROM pois WHERE id = ?", (poi_id,)).fetchone()
+        if not row:
+            raise KeyError("poi not found")
+        return row
+
+    def _assert_within_radius(self, poi: sqlite3.Row, lat: float, lng: float) -> float:
+        dist = haversine_m(float(poi["latitude"]), float(poi["longitude"]), float(lat), float(lng))
+        if dist > GEO_RADIUS_M:
+            raise PermissionError("too_far")
+        return dist
+
+    def _new_pass_code(self) -> str:
+        for _ in range(40):
+            code = "".join(secrets.choice(PASS_CODE_ALPHABET) for _ in range(7))
+            exists = self.conn.execute(
+                "SELECT 1 FROM visit_requests WHERE pass_code = ?", (code,)
+            ).fetchone()
+            if not exists:
+                return code
+        raise ValueError("could not allocate pass code")
+
+    def _save_selfie_bytes(self, request_id: str, raw: bytes, ext: str = "jpg") -> str:
+        if len(raw) < 800 or len(raw) > 3_500_000:
+            raise ValueError("selfie too small or too large")
+        dest = selfies_dir() / f"{request_id}.{ext}"
+        dest.write_bytes(raw)
+        return str(dest)
+
+    def decode_selfie_data_url(self, data_url: str) -> tuple[bytes, str]:
+        raw = (data_url or "").strip()
+        if not raw:
+            raise ValueError("selfie required")
+        match = re.match(r"^data:image/(jpeg|jpg|png|webp);base64,(.+)$", raw, re.I | re.S)
+        if match:
+            ext = "jpg" if match.group(1).lower() in ("jpeg", "jpg") else match.group(1).lower()
+            try:
+                blob = base64.b64decode(match.group(2), validate=False)
+            except Exception as exc:
+                raise ValueError("invalid selfie") from exc
+            return blob, ext
+        try:
+            blob = base64.b64decode(raw, validate=False)
+        except Exception as exc:
+            raise ValueError("invalid selfie") from exc
+        return blob, "jpg"
+
+    def add_notification(self, user_id: str, kind: str, title: str, body: str = "", payload: Optional[dict] = None) -> dict:
+        nid = str(uuid.uuid4())
+        t = now_iso()
+        self.conn.execute(
+            """
+            INSERT INTO user_notifications (id, user_id, kind, title, body, payload_json, read_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+            """,
+            (nid, user_id, kind, title, body, json.dumps(payload or {}, ensure_ascii=False), t),
+        )
+        self.conn.commit()
+        return {
+            "id": nid,
+            "user_id": user_id,
+            "kind": kind,
+            "title": title,
+            "body": body,
+            "payload": payload or {},
+            "read_at": None,
+            "created_at": t,
+        }
+
+    def list_notifications(self, user_id: str) -> List[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM user_notifications
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 50
+            """,
+            (user_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = row_to_dict(r)
+            try:
+                d["payload"] = json.loads(d.get("payload_json") or "{}")
+            except json.JSONDecodeError:
+                d["payload"] = {}
+            out.append(d)
+        return out
+
+    def mark_notification_read(self, user_id: str, note_id: str) -> dict:
+        row = self.conn.execute(
+            "SELECT * FROM user_notifications WHERE id = ? AND user_id = ?",
+            (note_id, user_id),
+        ).fetchone()
+        if not row:
+            raise KeyError("notification not found")
+        t = now_iso()
+        self.conn.execute(
+            "UPDATE user_notifications SET read_at = ? WHERE id = ?",
+            (t, note_id),
+        )
+        self.conn.commit()
+        d = row_to_dict(row)
+        d["read_at"] = t
+        return d
+
+    def public_user_card(self, user_id: str) -> dict:
+        user = self.get_user(user_id)
+        if not user:
+            raise KeyError("user not found")
+        prof = self.get_user_profile(user_id) or {}
+        wallet = self.conn.execute(
+            "SELECT balance_ut FROM wallets WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return {
+            "id": user["id"],
+            "display_name": user.get("display_name") or "",
+            "full_name": (prof.get("full_name") if prof else "") or user.get("display_name") or "",
+            "balance_ut": float(wallet["balance_ut"]) if wallet else 0.0,
+        }
+
+    def list_live_guest_streams(self, poi_id: str) -> List[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT g.*, u.display_name
+            FROM poi_guest_streams g
+            JOIN users u ON u.id = g.user_id
+            WHERE g.poi_id = ? AND g.status = 'live'
+            ORDER BY g.started_at
+            """,
+            (poi_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = row_to_dict(r)
+            d["display_name"] = r["display_name"]
+            out.append(d)
+        return out
+
+    def start_guest_stream(self, user: dict, poi_id: str, body: dict) -> dict:
+        self.require_kiosk_registered(user)
+        poi = self._poi_row(poi_id)
+        if int(poi["is_closed"] or 0):
+            raise ValueError("guest streams only on open events")
+        status = poi["status"] or "published"
+        if status not in ("published",):
+            raise ValueError("place is not live")
+        try:
+            lat = float(body["latitude"])
+            lng = float(body["longitude"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("latitude and longitude required") from exc
+        dist = self._assert_within_radius(poi, lat, lng)
+        existing = self.conn.execute(
+            """
+            SELECT id FROM poi_guest_streams
+            WHERE poi_id = ? AND user_id = ? AND status = 'live'
+            """,
+            (poi_id, user["id"]),
+        ).fetchone()
+        if existing:
+            return self.guest_stream_payload(existing["id"])
+        facing = body.get("facing_mode") or "user"
+        if facing not in ("user", "environment"):
+            facing = "user"
+        cam = self.add_camera(poi_id, {
+            "name": f"Гостевой эфир · {user.get('display_name') or 'user'}",
+            "role": "guest",
+            "view_mode": "standard",
+            "is_active": True,
+            "is_preview": False,
+            "source_type": "local_usb",
+            "stream_url": f"local://facing/{facing}",
+            "device_label": "front" if facing == "user" else "back",
+            "slot_index": 20,
+        })
+        sid = str(uuid.uuid4())
+        t = now_iso()
+        self.conn.execute(
+            """
+            INSERT INTO poi_guest_streams
+                (id, poi_id, user_id, camera_id, status, latitude, longitude, started_at, ended_at)
+            VALUES (?, ?, ?, ?, 'live', ?, ?, ?, NULL)
+            """,
+            (sid, poi_id, user["id"], cam.id, lat, lng, t),
+        )
+        self.conn.commit()
+        data = self.guest_stream_payload(sid)
+        data["distance_m"] = round(dist, 1)
+        return data
+
+    def stop_guest_stream(self, user: dict, poi_id: str, stream_id: Optional[str] = None) -> dict:
+        q = """
+            SELECT * FROM poi_guest_streams
+            WHERE poi_id = ? AND user_id = ? AND status = 'live'
+        """
+        params: list[Any] = [poi_id, user["id"]]
+        if stream_id:
+            q += " AND id = ?"
+            params.append(stream_id)
+        row = self.conn.execute(q + " ORDER BY started_at DESC", params).fetchone()
+        if not row:
+            raise KeyError("guest stream not found")
+        t = now_iso()
+        self.conn.execute(
+            "UPDATE poi_guest_streams SET status = 'ended', ended_at = ? WHERE id = ?",
+            (t, row["id"]),
+        )
+        if row["camera_id"]:
+            try:
+                self.conn.execute(
+                    "UPDATE cameras SET is_active = 0 WHERE id = ?",
+                    (row["camera_id"],),
+                )
+            except sqlite3.Error:
+                pass
+        self.conn.commit()
+        return self.guest_stream_payload(row["id"])
+
+    def guest_stream_payload(self, stream_id: str) -> dict:
+        row = self.conn.execute(
+            """
+            SELECT g.*, u.display_name
+            FROM poi_guest_streams g
+            JOIN users u ON u.id = g.user_id
+            WHERE g.id = ?
+            """,
+            (stream_id,),
+        ).fetchone()
+        if not row:
+            raise KeyError("guest stream not found")
+        d = row_to_dict(row)
+        d["display_name"] = row["display_name"]
+        return d
+
+    def _visit_request_payload(self, row: sqlite3.Row, *, include_profile: bool = False) -> dict:
+        d = row_to_dict(row)
+        d["selfie_url"] = f"/api/v1/visit-requests/{d['id']}/selfie" if d.get("selfie_path") else None
+        d["warning"] = VISIT_ENTRY_WARNING
+        if include_profile:
+            d["profile"] = self.public_user_card(d["user_id"])
+        poi = self.conn.execute("SELECT name FROM pois WHERE id = ?", (d["poi_id"],)).fetchone()
+        d["poi_name"] = poi["name"] if poi else ""
+        return d
+
+    def create_visit_request(self, user: dict, poi_id: str, body: dict, selfie_bytes: bytes, selfie_ext: str) -> dict:
+        self.require_kiosk_registered(user)
+        poi = self._poi_row(poi_id)
+        if not int(poi["is_closed"] or 0):
+            raise ValueError("visit requests only for closed events")
+        if not _as_bool(body.get("warning_accepted")):
+            raise ValueError("warning_accepted required")
+        pending = self.conn.execute(
+            """
+            SELECT id FROM visit_requests
+            WHERE poi_id = ? AND user_id = ? AND status = 'pending'
+            """,
+            (poi_id, user["id"]),
+        ).fetchone()
+        if pending:
+            raise ValueError("request already pending")
+        rid = str(uuid.uuid4())
+        path = self._save_selfie_bytes(rid, selfie_bytes, selfie_ext)
+        t = now_iso()
+        self.conn.execute(
+            """
+            INSERT INTO visit_requests
+                (id, poi_id, user_id, selfie_path, status, pass_code, warning_accepted, created_at, decided_at, decided_by)
+            VALUES (?, ?, ?, ?, 'pending', NULL, 1, ?, NULL, NULL)
+            """,
+            (rid, poi_id, user["id"], path, t),
+        )
+        self.conn.commit()
+        if poi["submitted_by"]:
+            self.add_notification(
+                poi["submitted_by"],
+                "visit_request",
+                "Новый запрос на вход",
+                f"{user.get('display_name') or 'Гость'} просит доступ на «{poi['name']}»",
+                {"request_id": rid, "poi_id": poi_id},
+            )
+        row = self.conn.execute("SELECT * FROM visit_requests WHERE id = ?", (rid,)).fetchone()
+        out = self._visit_request_payload(row)
+        out["warning"] = VISIT_ENTRY_WARNING
+        return out
+
+    def list_visit_requests_for_host(self, user: dict, poi_id: str) -> List[dict]:
+        if not self.is_poi_host(user, poi_id):
+            raise PermissionError("host or admin required")
+        self._poi_row(poi_id)
+        rows = self.conn.execute(
+            """
+            SELECT * FROM visit_requests
+            WHERE poi_id = ?
+            ORDER BY created_at DESC
+            """,
+            (poi_id,),
+        ).fetchall()
+        return [self._visit_request_payload(r, include_profile=True) for r in rows]
+
+    def list_my_visit_requests(self, user_id: str) -> List[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM visit_requests
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        return [self._visit_request_payload(r) for r in rows]
+
+    def list_visit_passes(self, user_id: str) -> List[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT p.*, poi.name AS poi_name
+            FROM visit_passes p
+            JOIN pois poi ON poi.id = p.poi_id
+            WHERE p.user_id = ?
+            ORDER BY p.created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        return [row_to_dict(r) for r in rows]
+
+    def decide_visit_request(self, actor: dict, request_id: str, approve: bool) -> dict:
+        row = self.conn.execute(
+            "SELECT * FROM visit_requests WHERE id = ?", (request_id,)
+        ).fetchone()
+        if not row:
+            raise KeyError("request not found")
+        if not self.is_poi_host(actor, row["poi_id"]):
+            raise PermissionError("host or admin required")
+        if row["status"] != "pending":
+            raise ValueError("request already decided")
+        t = now_iso()
+        code = None
+        if approve:
+            code = self._new_pass_code()
+            self.conn.execute(
+                """
+                UPDATE visit_requests
+                SET status = 'approved', pass_code = ?, decided_at = ?, decided_by = ?
+                WHERE id = ?
+                """,
+                (code, t, actor["id"], request_id),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO visit_passes (id, user_id, poi_id, request_id, pass_code, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), row["user_id"], row["poi_id"], request_id, code, t),
+            )
+            poi = self.conn.execute("SELECT name FROM pois WHERE id = ?", (row["poi_id"],)).fetchone()
+            self.add_notification(
+                row["user_id"],
+                "visit_approved",
+                "Вход одобрен",
+                f"Ваш код для «{poi['name'] if poi else 'мероприятие'}»: {code}",
+                {"request_id": request_id, "poi_id": row["poi_id"], "pass_code": code},
+            )
+        else:
+            self.conn.execute(
+                """
+                UPDATE visit_requests
+                SET status = 'rejected', decided_at = ?, decided_by = ?
+                WHERE id = ?
+                """,
+                (t, actor["id"], request_id),
+            )
+            poi = self.conn.execute("SELECT name FROM pois WHERE id = ?", (row["poi_id"],)).fetchone()
+            self.add_notification(
+                row["user_id"],
+                "visit_rejected",
+                "Во входе отказано",
+                f"Запрос на «{poi['name'] if poi else 'мероприятие'}» отклонён.",
+                {"request_id": request_id, "poi_id": row["poi_id"]},
+            )
+        self.conn.commit()
+        fresh = self.conn.execute("SELECT * FROM visit_requests WHERE id = ?", (request_id,)).fetchone()
+        return self._visit_request_payload(fresh, include_profile=True)
+
+    def get_visit_request(self, request_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM visit_requests WHERE id = ?", (request_id,)
+        ).fetchone()
+        return row_to_dict(row) if row else None
+

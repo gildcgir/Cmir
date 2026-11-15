@@ -17,8 +17,10 @@
 **/data/masks/
 .env
 .env.*
+!.env.example
 **/.env
 **/.env.*
+!**/.env.example
 **/camera-publish.log
 **/__pycache__/
 **/.venv/
@@ -27,6 +29,7 @@
 apps/web/media/
 apps/ingest/samples/
 # Android / IDE / local
+.cursor/
 apps/android/.gradle/
 apps/android/.idea/
 apps/android/.kotlin/

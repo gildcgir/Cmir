@@ -161,7 +161,7 @@ function refreshPoiMarkers() {
     const m = L.marker([poi.latitude, poi.longitude], {
       icon: L.divIcon({
         className: "",
-        html: `<div style="background:${poi.id === selectedPoiId ? "#4d9fff" : "#2d6a9f"};color:#fff;padding:4px 8px;border-radius:6px;font-size:11px">${poi.name}</div>`,
+        html: `<div style="background:${poi.id === selectedPoiId ? "#4d9fff" : (poi.is_closed ? "#8a2f2f" : "#1f6b45")};color:#fff;padding:4px 8px;border-radius:6px;font-size:11px">${poi.name} · ${poi.is_closed ? "закр." : "откр."}</div>`,
         iconAnchor: [20, 10],
       }),
     }).addTo(map).on("click", () => {
@@ -510,6 +510,8 @@ async function selectPoi(id) {
   document.getElementById("poiComment").value = poi.comment || "";
   document.getElementById("poiLat").value = poi.latitude;
   document.getElementById("poiLng").value = poi.longitude;
+  const closed = document.getElementById("poiClosed");
+  if (closed) closed.checked = !!poi.is_closed;
   document.getElementById("camerasSection").style.display = "block";
   document.getElementById("maskSection").style.display = "block";
   pendingMaskFile = null;
@@ -536,7 +538,7 @@ async function loadSubmissions() {
     <div class="stream-item" style="padding:0.75rem 0;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;justify-content:space-between">
       <div>
         <strong>${p.name}</strong>
-        <p class="hint" style="margin:0.2rem 0 0">${p.address || "—"} · ${Number(p.latitude).toFixed(4)}, ${Number(p.longitude).toFixed(4)} · камера: ${p.facing_mode || "user"}</p>
+        <p class="hint" style="margin:0.2rem 0 0">${p.address || "—"} · ${Number(p.latitude).toFixed(4)}, ${Number(p.longitude).toFixed(4)} · ${p.is_closed ? "закрытое" : "открытое"} · камера: ${p.facing_mode || "user"}</p>
         <p class="hint" style="margin:0">${p.comment || p.description || ""}</p>
       </div>
       <div style="display:flex;gap:0.35rem">
@@ -666,6 +668,7 @@ function bindEvents() {
       const r = await api("POST", "/api/v1/pois", {
         name, address, comment, description: comment, poi_type: "live_cam",
         latitude: lat, longitude: lon, city: "", country: "",
+        is_closed: !!document.getElementById("dlgPoiClosed")?.checked,
       });
       closeModal("addPoiModal");
       addPoiFromMap = false;
@@ -697,6 +700,7 @@ function bindEvents() {
         comment: document.getElementById("poiComment").value,
         latitude: parseFloat(document.getElementById("poiLat").value),
         longitude: parseFloat(document.getElementById("poiLng").value),
+        is_closed: !!document.getElementById("poiClosed")?.checked,
       });
       log("Место сохранено");
       await loadPois();

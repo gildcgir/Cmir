@@ -1,8 +1,8 @@
-# Cmir — повторный аудит `apps/` (после C1–C6)
+# Cmir — повторный аудит `apps/` (2026-08-14)
 
-Дата: 2026-07-31 (re-audit). Scope: `api_py`, `face-worker`, `web`/`consent-kiosk`, `android`.
+Дата: 2026-08-14 (re-audit после закрытия 5 Critical + 5 High). Scope: `api_py`, `face-worker`, `web`/`consent-kiosk`, `android`.
 
-Контекст: критичные пункты прошлого аудита закрыты. Ниже — **верификация фиксов** и **оставшийся** риск (security / architecture / bugs / performance). Lab-стек; Critical особенно опасны вне localhost.
+Метод: статическая проверка фиксов + HTTP smoke на lab API `:8090` + pytest `tests/functional` + `tests/unit` (77 passed).
 
 ---
 
@@ -10,123 +10,111 @@
 
 | # | Было | Статус | Доказательство |
 |---|------|--------|----------------|
-| C1 | Публичный dump embeddings | **FIXED** | `GET /consented-faces` → 401 без `X-Cmir-Worker`; браузер → `POST /face-match` |
-| C2 | Plaintext templates / слабый ключ | **FIXED** | `encrypt_embedding` на `poi_embeddings`/`face_templates`; `CMIR_DATA_KEY` обязателен в prod |
-| C3 | Presence без auth | **FIXED** | Worker token **или** JWT self; браузер шлёт только self |
-| C4 | Acquire/release + public `force` | **PARTIALLY FIXED** | `force` → admin; prod auth на acquire/release. Остаётся: lab anon acquire; `browser_usb` → `force_stop` любому auth-user в prod |
-| C5 | Revoke / admin/admin / пороги | **FIXED** | `face_embedding = NULL`; `CMIR_ADMIN_PASSWORD` в prod; thresholds 0.82/0.75 |
-| C6 | MediaPipe leak / lock на HLS | **PARTIALLY FIXED** | `LiveCameraView.detector.close()` OK; wait HLS вне lock. Остаётся: kiosk `FaceLandmarker` / `mask-preview` без `.close()`; worker `stderr=PIPE` |
+| C1 | Публичный dump embeddings | **FIXED** | `GET /consented-faces` → 401 без worker token |
+| C2 | Plaintext templates / слабый ключ | **FIXED** | `encrypt_embedding`; `CMIR_DATA_KEY` обязателен в prod |
+| C3 | Presence без auth | **FIXED** | Worker token или JWT self |
+| C4 | Acquire/release + public `force` | **FIXED** | `force` → admin; `browser_usb` → host/admin; GET playback/kiosk **не** acquire |
+| C5 | Revoke / admin/admin / пороги | **FIXED** | `face_embedding = NULL`; `CMIR_ADMIN_PASSWORD` в prod |
+| C6 | MediaPipe leak / lock на HLS | **PARTIAL** | LiveCamera `detector.close()` + stderr drain. Остаётся: kiosk Landmarker / mask-preview без `.close()` |
 
 ---
 
-## Critical (открытые)
+## Critical (были open 2026-07-31) — закрыты
 
-1. **Public `POST /face-match` identity oracle** (побочный эффект C1) — без auth возвращает `user_id` / `display_name` / `score` (`server.py` ~1070).  
-   **Fix:** JWT/viewer-token + rate-limit; не отдавать identity анонимам.
+1. **Public `POST /face-match` identity oracle** — **FIXED**. Rate-limit по IP (40/мин). Prod: JWT или worker. Lab anon: `{matched: true/false}` без `user_id` / `display_name` / `score`. JWT/worker получают identity. Smoke: anon match без PII.
 
-2. **Worker revoke-cache bug** — `reload_consented`: `if fresh:` не обновляет gallery при пустом списке → после полного revoke старые векторы остаются до рестарта (`worker.py` ~133–138).  
-   **Fix:** различать fetch fail vs authenticated empty; всегда назначать при HTTP 200.
+2. **Worker revoke-cache `if fresh:`** — **FIXED**. `fetch_consented_faces_from_api` → `None` при ошибке, `[]` при HTTP 200 empty. `reload_consented` назначает, если `fresh is not None`.
 
-3. **Unauthenticated airtime mint** — `POST /pois/{id}/airtime` начисляет ST/UT без auth (`server.py` ~1168).  
-   **Fix:** admin/worker only или удалить в пользу face-presence.
+3. **Unauthenticated airtime mint** — **FIXED**. `POST /pois/{id}/airtime` → admin. `GET` → любой auth user. Smoke: POST без токена → 401.
 
-4. **`CMIR_ENV` defaults to `test`** — prod-гейты (data key, admin pwd, acquire auth) легко пропустить (`database.py`).  
-   **Fix:** fail-closed на `0.0.0.0` без явного `CMIR_ENV=prod` + обязательных секретов.
+4. **`CMIR_ENV` defaults to `test`** — **FIXED**. `app_env()` без переменной → `prod` (fail-closed). `main()` отказывается биндить `0.0.0.0` без явного `CMIR_ENV`. Prod требует `CMIR_DATA_KEY`, `CMIR_ADMIN_PASSWORD`, `CMIR_WORKER_TOKEN`. Lab-скрипты задают `CMIR_ENV=test`.
 
-5. **RTMP `stderr=PIPE` без reader** — риск deadlock ffmpeg (`rtmp_writer.py`; также relay worker PIPE).
+5. **RTMP `stderr=PIPE` без reader** — **FIXED**. Drain-thread в `rtmp_writer.py` и `local_relay.py` (publisher + mask worker).
 
 ---
 
-## High
+## High (были open #6–#10) — закрыты / принятый остаток
 
-6. **`browser_usb` = stealth force_stop** — обход admin-only `force` (`server.py` ~833).
+6. **`browser_usb` stealth `force_stop`** — **FIXED**. Нужен JWT + admin или POI host. Smoke: 401 без auth.
 
-7. **C4 bypass: GET playback / kiosk-stream** — unauth `LOCAL_RELAY.acquire` + HLS URLs (`server.py` ~459, ~601).
+7. **C4 bypass: GET playback / kiosk-stream acquire** — **FIXED**. GET больше не вызывает `LOCAL_RELAY.acquire`. `stream_url` / `rtsp_url` убраны из playback.
 
-8. **Open HLS / preview-clip / mask-image** — без auth; CORS `*`.
+8. **Open HLS / preview-clip / mask-image / CORS `*`** — **PARTIAL (принято)**. RTSP/direct URL закрыты. Публичный **masked HLS** и CORS `*` оставлены сознательно: карта/WebView смотрят защищённый поток без логина. Preview-clip и mask-image — публичные артефакты маски, не сырой RTSP.
 
-9. **Donations / health-snapshot / health-history / health-all** — слабый или нулевой auth; stream URLs наружу.
+9. **Donations / health-*** — **FIXED**. POST donations → user. GET donations / health-all / health / health-history / health-snapshot → admin. `stream_url` из health-ответов убран. GET `/cameras/{id}` стрипает `stream_url`/`device_id` для не-admin.
 
-10. **Wallet lookup с PII** — email + display_name.
+10. **Wallet lookup с PII** — **FIXED**. `get_wallet` отдаёт только address / user_id / balances / created_at (без email / display_name).
 
-11. **Kiosk register + temp password на экране**; enrollment timeout 9s = success.
+---
 
-12. **OAuth `state` без server store**; Android cleartext + WebView over-grant.
+## High (ещё открыты)
 
+11. **Kiosk register + temp password на экране**; enrollment timeout 9s = success (`face-enroll.js`).
+12. **OAuth `state` без server store**; debug Android cleartext (release: `usesCleartextTraffic=false`; debug NSC разрешает cleartext).
 13. **Orphan ffmpeg / double-worker race / no RTSP reconnect** (`local_relay`, `rtsp_capture`).
-
-14. **Client-controlled `ad_revenue` on views** → UT inflation.
-
-15. **XSS via `innerHTML`** (admin/kiosk/user strings); kiosk `api()` без JWT.
+14. **Client-controlled `ad_revenue` on views** → UT inflation (`POST /views`).
+15. **XSS via `innerHTML`** (admin/kiosk/user strings); kiosk `api()` без JWT на части вызовов.
 
 ---
 
-## Medium
+## Medium (без изменений в этом проходе)
 
-12. **Kiosk FaceLandmarker без `.close()`** — `stopLive()` не закрывает landmarker (`kiosk/index.html`).
-13. **`mask-preview.js` detector без `.close()`** в `stop()`.
-14. **face-worker / relay `stderr=PIPE` без reader** — риск блокировки ffmpeg/worker (`rtmp_writer.py`, `local_relay._ensure_worker`).
-15. **PrivacyGate `frame.copy()`** — буфер ~delay_frames полных кадров в RAM (`privacy_gate.py`).
-16. **Gallery cache до ~150 кадров** после revoke (~5s @30fps) — окно unmask после отзыва (`worker.py` reload).
-17. **Presence reward check-then-insert** без жёсткой транзакции/UNIQUE race (`store.record_face_presence`).
-18. **Enrollment timeout 9s** засчитывает позу как успех (`face-enroll.js` `_waitPose`).
-19. **stdlib single-thread `HTTPServer`** + блокирующие HLS probes в request path.
-20. **Token в localStorage**, CORS `*`, длинные сессии.
-21. **Demo/constant seed embeddings** после L2-norm kollапсируют → ложные матчи в тестах/демо.
+- Kiosk FaceLandmarker / `mask-preview.js` detector без `.close()`.
+- PrivacyGate `frame.copy()` bounded RAM.
+- Gallery cache ~150 кадров после revoke (~5s).
+- Presence check-then-insert race.
+- stdlib single-thread `HTTPServer` + blocking probes.
+- Token в localStorage; длинные сессии.
 
 ---
 
-## Memory leaks / races (фокус)
+## Memory leaks / races
 
 | Область | Находка | Severity |
 |---------|---------|----------|
-| Browser LiveCamera | `detector.close()` на stop | OK (fixed) |
-| Kiosk enroll | Landmarker не закрывается | Medium |
-| mask-preview | Detector не закрывается | Medium |
-| PrivacyGate | Копии кадров в deque | Medium (by design, bounded) |
-| RTMP writer | stderr PIPE без drain | Medium (hang risk) |
-| Relay worker | stderr PIPE | Medium |
-| Gallery reload | Race: revoke vs in-memory faces | Medium (bounded lag) |
-| acquire browser_usb | Race/abuse vs viewers | High |
-| SQLite presence | TOCTOU insert | Medium |
-| PreviewBuffer | stop unlink clip; thread Event | OK-ish |
+| Browser LiveCamera | `detector.close()` на stop; stream больше не теряется, если MediaPipe падает | OK |
+| RTMP / relay stderr | Drain thread | OK (was hang) |
+| Gallery reload | Empty list now applied; lag ~reload interval | Medium |
+| Kiosk enroll Landmarker | не закрывается | Medium |
+| acquire browser_usb | host/admin only | OK |
+| XSS innerHTML | admin/user/kiosk | High |
 
 ---
 
-## Video bottlenecks
+## Video bottlenecks (без изменений)
 
-1. **Тройное кодирование:** USB → ffmpeg RTMP → MediaMTX → decode (worker) → MediaPipe → re-encode RTMP → HLS.  
-2. **PrivacyGate delay** (по умолчанию 250–900ms кадров в RAM).  
-3. **Browser face-match RTT** каждые ~400ms на трек (новый путь после C1) — CPU + API load.  
-4. **PreviewBuffer** — ещё один ffmpeg с HLS.  
-5. **Blocking `hls_playlist_ready`** в HTTP handlers (`playback`/`acquire` wait).  
-6. **CDN MediaPipe** cold-start в браузере.  
-7. **Single USB device holder** — сериализация POI на одной камере.
+1. Тройное кодирование USB → RTMP → decode → MediaPipe → RTMP → HLS.  
+2. PrivacyGate delay.  
+3. Browser face-match RTT.  
+4. PreviewBuffer ffmpeg.  
+5. Blocking HLS probes в HTTP handlers.  
+6. MediaPipe cold-start.  
+7. Single USB device holder.
+
+Дополнительно 2026-08-14: на Android камера открывается **до** MediaPipe; при падении detector — blur fallback (не чёрный экран / не повторный getUserMedia).
 
 ---
 
 ## Что относительно ок
 
-- PBKDF2 пароли, session tokens через `secrets`.  
+- PBKDF2, session tokens через `secrets`.  
 - Worker-token на biometric dump; templates encrypted at rest.  
-- Revoke чистит templates + NULL `face_embedding`.  
-- Presence auth закрыт.  
-- `force` admin-only.  
-- LiveCamera MediaPipe close + thresholds выровнены.  
-- Relay больше не sleep’ит на HLS под `_lock` при acquire.  
-- Multi-pose enrollment — правильное направление.  
-- Admin mutations в целом gated; prod блокирует clear/demo seed и требует data/admin keys.
+- Face-match больше не identity oracle для анонимов.  
+- Airtime mint, donations, health, browser_usb, GET acquire закрыты.  
+- Wallet без email/display_name.  
+- Fail-closed `CMIR_ENV` + bind guard.  
+- ffmpeg stderr drain.  
+- LiveCamera: getUserMedia first, no stream leak, mobile junk-ID filter.
 
 ---
 
 ## Приоритет следующих фиксов
 
-1. Auth/rate-limit **face-match**; fix worker `if fresh:` revoke cache.  
-2. Auth/disable **airtime**; fail-closed `CMIR_ENV` + secrets.  
-3. Drain **stderr PIPE**; process-group kill; `detector.close()` в worker.  
-4. Закрыть GET playback/kiosk/HLS/preview; ограничить **browser_usb**.  
-5. Auth donations/health; убрать wallet PII; OAuth state store.  
-6. Enrollment timeout ≠ success; landmarker/mask-preview `.close()`; escape `innerHTML`.  
-7. Android cleartext off (release); cut frame copies / async gallery refresh.
+1. XSS `innerHTML` + kiosk JWT.  
+2. Enrollment timeout ≠ success; temp password не на экране.  
+3. Cap/ignore client `ad_revenue`.  
+4. OAuth state store; debug cleartext только localhost.  
+5. Landmarker/mask-preview `.close()`; RTSP reconnect / process-group kill.  
+6. Опционально: сузить CORS и preview-clip в prod.
 
-Источники re-audit: parallel explore — API, face-worker, web/kiosk/android (2026-07-31).
+Источники: code review + HTTP smoke 2026-08-14 + pytest 77 passed.
