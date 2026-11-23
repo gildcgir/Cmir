@@ -43,6 +43,7 @@ services:
       - CMIR_RTSP=rtsp://cmir-mediamtx:8554
     volumes:
       - ./data:/app/data
+      - ./data:/app/apps/api_py/data
     depends_on:
       - mediamtx
 

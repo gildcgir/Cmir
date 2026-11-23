@@ -24,7 +24,11 @@ def db_path() -> Path:
     explicit = os.environ.get("CMIR_DB_PATH", "")
     if explicit:
         return Path(explicit)
-    base = Path(__file__).resolve().parent / "data"
+    data_dir = os.environ.get("CMIR_DATA_DIR", "")
+    if data_dir:
+        base = Path(data_dir)
+    else:
+        base = Path(__file__).resolve().parent / "data"
     if app_env() == "prod":
         return base / "cmir_prod.db"
     return base / "cmir_test.db"
