@@ -932,9 +932,9 @@ class Store:
                 pass
         return deleted
 
-    def ensure_demo_fixtures(self) -> List[str]:
+    def ensure_demo_fixtures(self, force: bool = False) -> List[str]:
         """Идемпотентно восстанавливает демо-места для test-среды (карта, киоск, перфоманс)."""
-        if app_env() == "prod":
+        if app_env() == "prod" and not force:
             return []
         created: List[str] = []
         created.extend(self._ensure_demo_social_event())

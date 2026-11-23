@@ -263,7 +263,7 @@
   </p>
 
   <script type="module">
-    import { getToken, setToken } from '../js/api.js';
+    import { getToken, setToken, API } from '../js/api.js';
     import { startMaskedPageCamera } from '../js/live-camera.js?v=camfix12';
     import { ENROLL_POSES, PoseEnrollment, yawPitchFromBbox, yawPitchFromKeypoints, yawPitchFromMatrix } from '../js/face-enroll.js?v=enroll6';
 
@@ -273,11 +273,6 @@
       document.body.classList.add('cmir-android');
     }
 
-    const API = localStorage.getItem('cmir_api') || (
-      (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
-        ? 'http://127.0.0.1:8090'
-        : `http://${location.hostname}:8090`
-    );
     const qs = new URLSearchParams(location.search);
     let poiId = qs.get('poi') || localStorage.getItem('cmir_kiosk_poi') || '';
     let documents = [];
@@ -519,15 +514,24 @@
     }
 
     async function resolvePoi() {
-      const res = await fetch(`${API}/api/v1/pois`);
-      const json = await res.json();
-      const list = json.data || [];
-      const poi = pickKioskPoi(list);
-      if (!poi) throw new Error('Нет места (POI). Создайте в админке.');
-      poiId = poi.id;
-      localStorage.setItem('cmir_kiosk_poi', poiId);
-      document.getElementById('poiName').textContent = `Заведение: ${poi.name}`;
-      return poi;
+      try {
+        const res = await fetch(`${API}/api/v1/pois`);
+        if (res.ok) {
+          const json = await res.json();
+          const list = json.data || [];
+          const poi = pickKioskPoi(list);
+          if (poi) {
+            poiId = poi.id;
+            localStorage.setItem('cmir_kiosk_poi', poiId);
+            document.getElementById('poiName').textContent = `Заведение: ${poi.name}`;
+            return poi;
+          }
+        }
+      } catch (e) {
+        console.warn('resolvePoi failed', e);
+      }
+      document.getElementById('poiName').textContent = 'Режим регистрации (Киоск)';
+      return null;
     }
 
     async function loadMenu() {
@@ -578,9 +582,17 @@
     });
 
     async function startLiveStream() {
-      const poisRes = await fetch(`${API}/api/v1/pois`);
-      const poi = (await poisRes.json()).data?.find((p) => p.id === poiId);
-      const cam = previewCamera(poi);
+      let poi = null;
+      let cam = null;
+      try {
+        const poisRes = await fetch(`${API}/api/v1/pois`);
+        if (poisRes.ok) {
+          const json = await poisRes.json();
+          const list = json.data || [];
+          poi = (poiId ? list.find((p) => p.id === poiId) : null) || pickKioskPoi(list) || null;
+          if (poi) cam = previewCamera(poi);
+        }
+      } catch (_) {}
       liveLabel.textContent = 'Подключение камеры…';
       stopLive();
       try {
@@ -597,27 +609,31 @@
         });
         liveLabel.textContent = 'Камера готова — следуйте подсказкам';
       } catch (e) {
-        // Fallback to configured POI camera path
-        try {
-          const fallbacks = (poi?.cameras || []).filter((c) => c.is_active && c.id !== cam?.id);
-          const { startMaskedPageCamera } = await import('../js/live-camera.js?v=camfix12');
-          const result = await startMaskedPageCamera({
-            video: live,
-            canvas: document.getElementById('liveMaskCanvas'),
-            cam,
-            poi,
-            fallbackCams: fallbacks,
-            apiBase: API,
-            clientId: getClientId(),
-            usbOnly: false,
-            onStatus: (msg) => { if (msg) liveLabel.textContent = msg; },
-          });
-          liveView = result.view;
-          hls = result.hls;
-          liveLabel.textContent = 'Камера готова — следуйте подсказкам';
-        } catch (e2) {
-          throw new Error(e2.message || e.message || 'Камера недоступна');
+        // Fallback to configured POI camera path if available
+        if (cam) {
+          try {
+            const fallbacks = (poi?.cameras || []).filter((c) => c.is_active && c.id !== cam?.id);
+            const { startMaskedPageCamera } = await import('../js/live-camera.js?v=camfix12');
+            const result = await startMaskedPageCamera({
+              video: live,
+              canvas: document.getElementById('liveMaskCanvas'),
+              cam,
+              poi,
+              fallbackCams: fallbacks,
+              apiBase: API,
+              clientId: getClientId(),
+              usbOnly: false,
+              onStatus: (msg) => { if (msg) liveLabel.textContent = msg; },
+            });
+            liveView = result.view;
+            hls = result.hls;
+            liveLabel.textContent = 'Камера готова — следуйте подсказкам';
+            return;
+          } catch (e2) {
+            console.warn('Fallback cam failed', e2);
+          }
         }
+        throw new Error(e.message || 'Камера недоступна');
       }
     }
 

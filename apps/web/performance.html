@@ -125,12 +125,22 @@
       if (!poi) {
         poi = list.find((p) => (p.cameras || []).some((c) => c.role === "performance" && c.is_active));
       }
-      if (!poi) throw new Error("Нет места с камерой «перфоманс». Настройте в админке.");
+      if (!poi && list.length > 0) {
+        poi = list[0];
+      }
+      if (!poi) {
+        setStatus("Нет мест в базе данных. Создайте место в админке.");
+        document.getElementById("poiName").textContent = "Нет мест";
+        return false;
+      }
       poiId = poi.id;
       currentPoi = poi;
       perfCamera = pickPerformanceCamera(poi);
-      if (!perfCamera) throw new Error("Нет активной камеры перфоманс у этого места.");
+      if (!perfCamera) {
+        perfCamera = { id: "cam-perf-fallback", name: "Камера устройства", role: "performance", is_active: true };
+      }
       document.getElementById("poiName").textContent = `${poi.name} · камера: ${perfCamera.name}`;
+      return true;
     }
 
     async function startStream() {
@@ -291,14 +301,16 @@
     });
 
     try {
-      await resolveContext();
-      const items = (await api("GET", `/api/v1/pois/${poiId}/menu-items`)).data || [];
-      document.getElementById("menuItem").innerHTML = '<option value="">— выберите —</option>'
-        + items.map((i) => `<option value="${i}">${i}</option>`).join("");
-      updateRegisterBtn();
-      await startStream();
-      if (await refreshMe()) {
-        document.getElementById("panelRegister").classList.remove("active");
+      const ok = await resolveContext();
+      if (ok) {
+        const items = (await api("GET", `/api/v1/pois/${poiId}/menu-items`).catch(() => ({ data: [] }))).data || [];
+        document.getElementById("menuItem").innerHTML = '<option value="">— выберите —</option>'
+          + items.map((i) => `<option value="${i}">${i}</option>`).join("");
+        updateRegisterBtn();
+        await startStream();
+        if (await refreshMe()) {
+          document.getElementById("panelRegister").classList.remove("active");
+        }
       }
     } catch (e) {
       setStatus(e.message);

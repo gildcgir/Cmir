@@ -1606,7 +1606,7 @@ class Handler(BaseHTTPRequestHandler):
             if require_admin(self) is None:
                 return
             try:
-                created = STORE.ensure_demo_fixtures()
+                created = STORE.ensure_demo_fixtures(force=True)
             except ValueError as e:
                 return json_response(self, 403, {"success": False, "error": str(e)})
             return json_response(
